@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.13 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.14 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -41,7 +41,9 @@
  *  - every row can be placed into its own Photoshop layer group.
  */
 
-var ver = '0.10.13',
+$.localize = true;
+
+var ver = '0.10.14',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -61,6 +63,7 @@ var s2t = stringIDToTypeID,
     doc = new AM('document'),
     lr = new AM('layer'),
     pth = new AM('path'),
+    str = new Locale(),
     cfg = new Config(),
     pythonApi = new AutoLayoutApi(API_HOST, API_PORT_SEND, API_PORT_LISTEN, API_FILE),
     pythonFeatures = new OptionalPythonFeatures(pythonApi, OPTIONAL_PYTHON_FAILURE_LIMIT),
@@ -126,7 +129,7 @@ function main() {
     var historyState;
     inputPreparation = null; preparedAnalysisItems = null; sourceState = null;
     try {
-        if (!apl.getProperty('numberOfDocuments')) throw new Error('Нет активного документа.')
+        if (!apl.getProperty('numberOfDocuments')) throw new Error(str.t('Нет активного документа.', 'No active document.'))
 
         isCancelled = false;
         historyState = activeDocument.activeHistoryState;
@@ -135,22 +138,22 @@ function main() {
         var semanticRequested = !!(cfg.alternateGender || cfg.considerHeadTurn || (cfg.colorMode && cfg.colorMode != 'off')),
             items, analysis = null, useGender = false, useHead = false;
         layoutProgressRun = { index: 0, total: 7 + (inputPreparation ? 2 : 0) + (cfg.groupRows ? 1 : 0) + (semanticRequested ? 2 : 0), active: false };
-        runLayoutProgressStage('Подготовка и выделение', function () {
+        runLayoutProgressStage('Preparation and selection', function () {
             historyState = activeDocument.activeHistoryState;
-            layoutUnitProgress(1, 2, 'Выбранные слои прочитаны');
+            layoutUnitProgress(1, 2, 'Selected layers read');
             selectionGeometry = collectSelectionGeometryWithHistory();
-            layoutUnitProgress(2, 2, 'Геометрия выделения прочитана');
+            layoutUnitProgress(2, 2, 'Selection geometry read');
         });
-        if (inputPreparation) runLayoutProgressStage('Подготовка объектов для анализа', function () {
+        if (inputPreparation) runLayoutProgressStage('Preparing objects for analysis', function () {
             activeDocument.suspendHistory('Auto layout prepare', 'prepareLayoutSources();');
             // Flush Photoshop's suspended-history cache before preview anchors.
             if (typeof app.refresh == 'function') app.refresh();
         });
-        items = runLayoutProgressStage('Чтение размеров слоёв', function () {
+        items = runLayoutProgressStage('Reading layer sizes', function () {
             return collectLayoutItems(sourceState.layerIds);
         }, 8, 30);
         genderSummary = null; headTurnSummary = null;
-        if (semanticRequested) runLayoutProgressStage('Анализ фотографий', function () {
+        if (semanticRequested) runLayoutProgressStage('Analyzing photos', function () {
             analysis = analyzeSemantics(items);
             genderSummary = analysis.gender; headTurnSummary = analysis.headTurn;
             if (analysis.previewHistoryTouched) {
@@ -160,7 +163,7 @@ function main() {
             useGender = !!(genderSummary && !genderSummary.fallbackToGeometry);
             useHead = !!(headTurnSummary && !headTurnSummary.fallbackToGeometry);
         }, 30, 32);
-        layoutPlan = runLayoutProgressStage('Расчёт заполнения выделения', function () {
+        layoutPlan = runLayoutProgressStage('Calculating selection packing', function () {
             return useGender ? buildGenderAwareLayoutPlan(items, selectionGeometry) : buildLayoutPlan(items, selectionGeometry);
         }, 32, 55);
         if (cfg.lockForAction && !lockedLayoutActive()) {
@@ -168,27 +171,27 @@ function main() {
             layoutPlan = freezeLayoutMetrics(layoutPlan, selectionGeometry);
         }
         layoutPlan.genderSummary = genderSummary;
-        if (semanticRequested) runLayoutProgressStage('Расстановка по признакам', function () {
+        if (semanticRequested) runLayoutProgressStage('Semantic ordering', function () {
             var useColor = !!(analysis.color && !analysis.color.fallbackToGeometry),
                 phases = (useGender || useHead ? 1 : 0) + (useColor ? 1 : 0), phase = 0;
             if (useGender || useHead) {
                 setLayoutProgressRange(phase++ / phases, 1 / phases);
                 layoutPlan = optimizeSemanticAssignment(layoutPlan, selectionGeometry, useGender, useHead);
-                layoutUnitProgress(1, 1, 'М/Д и направление позы учтены');
+                layoutUnitProgress(1, 1, 'Gender and pose ordering complete');
             }
             layoutPlan.headTurnSummary = headTurnSummary;
             if (useColor) {
                 setLayoutProgressRange(phase++ / phases, 1 / phases);
                 layoutPlan = optimizeColorAssignment(layoutPlan, selectionGeometry, useGender, useHead, cfg.colorMode);
-                layoutUnitProgress(1, 1, 'Цвет учтён');
+                layoutUnitProgress(1, 1, 'Color ordering complete');
             }
             layoutPlan.colorSummary = analysis.color;
         });
-        runLayoutProgressStage('Проверка раскладки', function () {
+        runLayoutProgressStage('Validating layout', function () {
             validateLayoutPlan(layoutPlan, selectionGeometry);
-            layoutUnitProgress(1, 2, 'Границы и пересечения проверены');
+            layoutUnitProgress(1, 2, 'Bounds and overlaps checked');
             validateSourceLayersBeforeApply();
-            layoutUnitProgress(2, 2, 'Исходные слои проверены');
+            layoutUnitProgress(2, 2, 'Source layers checked');
         });
         // All modifying stages retain the single original History/rollback boundary.
         if (inputPreparation) {
@@ -196,18 +199,18 @@ function main() {
             activeDocument.activeHistoryState = historyState;
             activeDocument.suspendHistory('Auto layout', 'commitPreparedLayout();');
         } else activeDocument.suspendHistory('Auto layout', 'applyLayoutPlan()');
-        runLayoutProgressStage('Восстановление выделения слоёв', function () {
+        runLayoutProgressStage('Restoring layer selection', function () {
             restoreLayerSelection(sourceState.layerIds, sourceState.activeLayerId);
         });
         if (shouldCollapseAllGroupsAfterLayout()) collapseAllLayerGroups();
         layoutProgressRun.active = false;
-        app.changeProgressText('Готово');
+        app.changeProgressText('Done');
         if (app.updateProgress(100, 100) === false) throwCancelled();
         runSucceeded = true;
     } catch (e) {
         if (historyState) {
             try { activeDocument.activeHistoryState = historyState } catch (restoreError) {
-                e = new Error((e.message || String(e)) + '\nНе удалось отменить изменения документа: ' + restoreError.message);
+                e = new Error((e.message || String(e)) + '\n' + str.t('Не удалось отменить изменения документа: ', 'Could not roll back document changes: ') + restoreError.message);
             }
         }
         if (sourceState) {
@@ -247,7 +250,7 @@ function validateLockedProfile(profile) {
     if (!profile || typeof profile.scale != 'number' || !isFinite(profile.scale) || profile.scale <= 0 ||
         typeof profile.gapX != 'number' || !isFinite(profile.gapX) || profile.gapX < 0 ||
         typeof profile.gapY != 'number' || !isFinite(profile.gapY) || profile.gapY < 0)
-        throw new Error('В экшене нет корректного масштаба и интервалов. Запишите шаг заново на готовой раскладке.');
+        throw new Error(str.t('В экшене нет корректного масштаба и интервалов. Запишите шаг заново на готовой раскладке.', 'The action does not contain valid scale and gap values. Record the step again using a completed layout.'));
 }
 
 function runAutoLayoutEntry() {
@@ -303,7 +306,7 @@ function freezeLayoutMetrics(plan, geometry) {
     }
     var frozen = finalizeLayoutRows(specs, profile.scale, profile.gapX / profile.scale, profile.gapY / profile.scale,
         profile.gapY, plan, lockedGapPolicy(specs, profile));
-    if (!frozen) throw new Error('Не удалось зафиксировать интервалы раскладки.');
+    if (!frozen) throw new Error(str.t('Не удалось зафиксировать интервалы раскладки.', 'Could not lock the layout gaps.'));
     frozen.autoRows = plan.autoRows;
     frozen.lockedMetrics = true;
     validateLayoutPlan(frozen, geometry);
@@ -324,7 +327,7 @@ function buildLockedLayoutPlan(items, geometry) {
     }
     var allocation = findMultiZoneAllocation(items, zones, scale, gx, gy, buildFastShapeSegmentCache(items),
         cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)), geometry.componentCount || 1);
-    if (!allocation) throw new Error('Фотографии не помещаются при масштабе и интервалах, записанных в экшене. Уменьшите количество фото или запишите новую раскладку.');
+    if (!allocation) throw new Error(str.t('Фотографии не помещаются при масштабе и интервалах, записанных в экшене. Уменьшите количество фото или запишите новую раскладку.', 'The photos do not fit with the scale and gaps recorded in the action. Reduce the number of photos or record a new layout.'));
     var specs = [], groups = [];
     for (var a = 0; a < allocation.assignments.length; a++) {
         var assignment = allocation.assignments[a];
@@ -339,16 +342,16 @@ function buildLockedLayoutPlan(items, geometry) {
         }
         balanceZoneRows(specs, indices, zone, scale, gx, gy);
         if (!placeContainerVerticalGroup(specs, indices, scale, profile.gapY, zone.top, zone.bottom))
-            throw new Error('Ряды не помещаются с зафиксированным интервалом.');
+            throw new Error(str.t('Ряды не помещаются с зафиксированным интервалом.', 'The rows do not fit with the locked gap.'));
     }
     var plan = finalizeLayoutRows(specs, scale, gx, gy, profile.gapY, {
         shapedSelection: !geometry.isRectangle, multiZoneSelection: !!geometry.multiZone,
         zoneCount: zones.length, usedZoneCount: allocation.usedZones, usedComponentCount: allocation.usedComponentCount,
         solverPasses: 1, lockedMetrics: true }, lockedGapPolicy(specs, profile));
-    if (!plan) throw new Error('Не удалось построить раскладку с параметрами экшена.');
+    if (!plan) throw new Error(str.t('Не удалось построить раскладку с параметрами экшена.', 'Could not build a layout using the action parameters.'));
     plan.autoRows = cfg.autoRows;
     validateLayoutPlan(plan, geometry);
-    progress(55, 'Раскладка с параметрами экшена рассчитана');
+    progress(55, 'Action layout calculated');
     return plan;
 }
 
@@ -368,19 +371,20 @@ function runLayoutProgressStage(name, work, low, high) {
 function executeLayoutProgressStage() {
     layoutProgressResult = layoutProgressWork();
     layoutProgressRun.waiting = false;
-    advanceLayoutProgress(1, 'Завершено');
+    advanceLayoutProgress(1, 'Completed');
 }
 
 function renderLayoutProgress() {
     var run = layoutProgressRun;
     if (!run) return;
-    var stageNames = { 'Подготовка и выделение': 'Выделение', 'Чтение размеров слоёв': 'Размеры',
-        'Анализ фотографий': 'Анализ', 'Расчёт заполнения выделения': 'Расчёт',
-        'Расстановка по признакам': 'Порядок', 'Проверка раскладки': 'Проверка',
-        'Общий масштаб слоёв': 'Масштаб', 'Позиционирование фотографий': 'Позиции', 'Расчёт трансформаций объектов': 'Трансформации', 'Трансформация исходных объектов': 'Исходные объекты',
-        'Восстановление выделения слоёв': 'Выделение слоёв', 'Группировка рядов': 'Группы', 'Подготовка объектов для анализа': 'Объекты', 'Восстановление исходных объектов': 'Исходные слои' },
+    var stageNames = { 'Preparation and selection': 'Selection', 'Reading layer sizes': 'Sizes',
+        'Analyzing photos': 'Analysis', 'Calculating selection packing': 'Packing',
+        'Semantic ordering': 'Ordering', 'Validating layout': 'Validation',
+        'Scaling layers': 'Scale', 'Positioning photos': 'Positions', 'Calculating object transforms': 'Transforms',
+        'Transforming source objects': 'Source objects', 'Restoring layer selection': 'Layer selection',
+        'Grouping rows': 'Groups', 'Preparing objects for analysis': 'Objects', 'Restoring source objects': 'Source layers' },
         title = run.index + '. ' + (stageNames[run.name] || run.name),
-        detail = run.waiting ? 'ожидание Python' : String(run.detail || '');
+        detail = run.waiting ? 'waiting for Python' : String(run.detail || '');
     if (title.length > 22) title = title.substr(0, 21) + '…';
     if (detail.length > 24) detail = detail.substr(0, 23) + '…';
     app.changeProgressText(title + ' [' + Math.round(run.done * 100) + '%]' +
@@ -409,7 +413,7 @@ function beginPythonProgressWait(fraction, expectedMs) {
     if (run.waiting && run.waitStarted != undefined) return;
     run.waiting = true;
     run.waitStarted = (new Date()).getTime(); run.waitBase = run.done;
-    var quota = fraction == undefined ? (run.name == 'Анализ фотографий' ? .05 : 1) : fraction;
+    var quota = fraction == undefined ? (run.name == 'Analyzing photos' ? .05 : 1) : fraction;
     run.waitSpan = Math.min(1 - run.done, run.length * quota);
     run.waitExpected = Math.max(250, expectedMs || 4000);
     renderLayoutProgress();
@@ -485,7 +489,7 @@ function dialog(editingAction) {
         chPythonPacking = pnAdditional.add('checkbox'),
         chAlternateGender = pnAdditional.add('checkbox'),
         chHeadTurn = pnAdditional.add('checkbox'),
-        stColor = pnAdditional.add('statictext', undefined, 'Расстановка по цвету одежды:'),
+        stColor = pnAdditional.add('statictext', undefined, str.colorTitle),
         dlColor = pnAdditional.add('dropdownlist'),
         stPythonStatus = pnAdditional.add("statictext{properties:{multiline:true},preferredSize:[255,-1]}"),
         pnOutput = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:10,margins:[10,20,10,10]}"),
@@ -509,41 +513,41 @@ function dialog(editingAction) {
     dlColor.alignment = ['fill', 'center'];
 
     dlg.text = 'Auto layout ' + ver
-    pnLayout.text = 'Раскладка'
-    pnGaps.text = 'Интервалы'
-    pnAdditional.text = 'Дополнительно'
-    pnOutput.text = 'Результат'
-    pnAction.text = 'Запись в экшен'
+    pnLayout.text = str.layoutPanel
+    pnGaps.text = str.gapsPanel
+    pnAdditional.text = str.additionalPanel
+    pnOutput.text = str.outputPanel
+    pnAction.text = str.actionPanel
 
-    chAutoRows.text = 'автоматически подбирать количество рядов'
-    stRows.text = 'Количество рядов:'
-    stRhythm.text = 'Вертикальный ритм:'
-    dlRhythm.add('item', 'Авто')
-    dlRhythm.add('item', 'Шире к центру')
-    dlRhythm.add('item', 'Шире к краям')
-    dlRhythm.add('item', 'Чередование — длинный сверху')
-    dlRhythm.add('item', 'Чередование — короткий сверху')
-    stAlign.text = 'По горизонтали:'
-    dlAlign.add('item', 'По левому краю')
-    dlAlign.add('item', 'По центру')
-    dlAlign.add('item', 'По правому краю')
-    dlAlign.add('item', 'По ширине')
-    stGapXTitle.text = 'Минимальный интервал X, %'
-    stGapYTitle.text = 'Минимальный интервал Y, %'
-    stGapMaxTitle.text = 'Максимальное увеличение'
-    stGapHint.text = 'Интервалы могут увеличиваться для более полного заполнения выделенной области, но никогда не становятся меньше заданного минимума.'
-    chPythonPacking.text = 'рассчитывать заполнение площадок в Python';
-    chPythonPacking.helpTip = 'Более широкий поиск для составного выделения. При недоступности сервера расчёт выполняет JSX.';
-    chAlternateGender.text = 'чередовать мальчиков и девочек'
-    chHeadTurn.text = 'учитывать разворот тела и головы'
-    chHeadTurn.helpTip = 'Поворот лица, корпус и мягкое предпочтение наклона головы к центру. Запрокидывание не считается боковым поворотом.'
-    chGroupRows.text = 'объединять каждый ряд в группу'
-    ok.text = editingAction ? 'Сохранить настройки экшена' : 'Разложить слои'
-    chLockAction.text = 'фиксировать отступы и трансформацию'
+    chAutoRows.text = str.autoRows
+    stRows.text = str.rows
+    stRhythm.text = str.verticalRhythm
+    dlRhythm.add('item', str.rhythmAuto)
+    dlRhythm.add('item', str.rhythmCenterWide)
+    dlRhythm.add('item', str.rhythmEdgesWide)
+    dlRhythm.add('item', str.rhythmAlternateWide)
+    dlRhythm.add('item', str.rhythmAlternateNarrow)
+    stAlign.text = str.horizontal
+    dlAlign.add('item', str.alignLeft)
+    dlAlign.add('item', str.alignCenter)
+    dlAlign.add('item', str.alignRight)
+    dlAlign.add('item', str.alignJustify)
+    stGapXTitle.text = str.gapX
+    stGapYTitle.text = str.gapY
+    stGapMaxTitle.text = str.maxGap
+    stGapHint.text = str.gapHint
+    chPythonPacking.text = str.pythonPacking;
+    chPythonPacking.helpTip = str.pythonPackingTip;
+    chAlternateGender.text = str.alternateGender
+    chHeadTurn.text = str.headTurn
+    chHeadTurn.helpTip = str.headTurnTip
+    chGroupRows.text = str.groupRows
+    ok.text = editingAction ? str.saveAction : str.layoutLayers
+    chLockAction.text = str.lockAction
     chLockAction.value = !!cfg.lockForAction;
     chLockAction.onClick = function () { cfg.lockForAction = !!this.value; };
-    chLockAction.helpTip = 'В экшен записываются реальный масштаб и интервалы X/Y. Число фотографий может меняться; параметры размера и интервалов сохраняются.';
-    cancel.text = 'Отмена'
+    chLockAction.helpTip = str.lockActionTip;
+    cancel.text = str.cancel
 
     chAutoRows.value = cfg.autoRows
     edRows.text = cfg.rows
@@ -563,7 +567,7 @@ function dialog(editingAction) {
     dlColor.onChange = function () {
         if (dlColor.selection) cfg.colorMode = colorModeFromSelection(dlColor.selection);
     };
-    dlColor.helpTip = 'По всему листу, включая обмены между рядами и площадками. Близкие цвета рядом или контраст соседей; схема М/Д сохраняется, близкие повороты допускают обмен.';
+    dlColor.helpTip = str.colorTip;
     chPythonPacking.value = cfg.pythonPacking;
     chPythonPacking.onClick = function () { cfg.pythonPacking = this.value; };
     chHeadTurn.value = cfg.considerHeadTurn;
@@ -573,7 +577,7 @@ function dialog(editingAction) {
     chAlternateGender.enabled = pythonAvailability.available
     stPythonStatus.visible = !pythonAvailability.available || !headAvailability.available || !!headAvailability.message
     stPythonStatus.text = pythonAvailability.available ? headAvailability.message :
-        'Python-функции недоступны: ' + pythonAvailability.message + '\nОбычная геометрическая раскладка работает без Python.'
+        str.pythonUnavailablePrefix + pythonAvailability.message + '\n' + str.geometryWithoutPython
     if (!stPythonStatus.visible) pnAdditional.remove(stPythonStatus);
     if (!pythonAvailability.available && !editingAction) {
         chAlternateGender.value = false
@@ -678,11 +682,11 @@ function dialog(editingAction) {
     }
 
     function updateGapHint() {
-        stGapMaxTitle.text = cfg.horizontalAlign == 'justify' ? 'Максимальное увеличение (Y)' : 'Максимальное увеличение'
+        stGapMaxTitle.text = cfg.horizontalAlign == 'justify' ? str.maxGapY : str.maxGap
         if (cfg.horizontalAlign == 'justify')
-            stGapHint.text = 'По ширине: горизонтальный интервал растягивается до границ выделения и не ограничивается максимальным множителем. Минимальный Gap X сохраняется; по Y действует обычный лимит.'
+            stGapHint.text = str.justifyGapHint
         else
-            stGapHint.text = 'Интервалы могут увеличиваться для более полного заполнения выделенной области, но никогда не становятся меньше заданного минимума.'
+            stGapHint.text = str.gapHint
     }
 
     return dlg
@@ -700,9 +704,9 @@ function canRun() {
 
 function getColorModes() {
     return [
-        { key: 'off', label: 'Не учитывать' },
-        { key: 'harmonious', label: 'Согласованные цвета' },
-        { key: 'contrast', label: 'Максимальный контраст' }
+        { key: 'off', label: str.colorOff },
+        { key: 'harmonious', label: str.colorHarmonious },
+        { key: 'contrast', label: str.colorContrast }
     ];
 }
 
@@ -729,6 +733,69 @@ function colorModeFromSelection(selection) {
 
 function colorModeLabel(value) {
     return getColorModes()[colorModeIndex(value)].label;
+}
+
+
+function Locale() {
+    var locale = String($.locale || '').toLowerCase(),
+        isRu = locale.indexOf('ru') == 0;
+    this.isRu = isRu;
+    this.t = function (ru, en) { return isRu ? ru : en; };
+
+    this.layoutPanel = this.t('Раскладка', 'Layout');
+    this.gapsPanel = this.t('Интервалы', 'Gaps');
+    this.additionalPanel = this.t('Дополнительно', 'Additional');
+    this.outputPanel = this.t('Результат', 'Result');
+    this.actionPanel = this.t('Запись в экшен', 'Action recording');
+    this.autoRows = this.t('автоматически подбирать количество рядов', 'automatically choose number of rows');
+    this.rows = this.t('Количество рядов:', 'Number of rows:');
+    this.verticalRhythm = this.t('Вертикальный ритм:', 'Vertical rhythm:');
+    this.rhythmAuto = this.t('Авто', 'Auto');
+    this.rhythmCenterWide = this.t('Шире к центру', 'Wider toward center');
+    this.rhythmEdgesWide = this.t('Шире к краям', 'Wider toward edges');
+    this.rhythmAlternateWide = this.t('Чередование — длинный сверху', 'Alternating — long row on top');
+    this.rhythmAlternateNarrow = this.t('Чередование — короткий сверху', 'Alternating — short row on top');
+    this.horizontal = this.t('По горизонтали:', 'Horizontal:');
+    this.alignLeft = this.t('По левому краю', 'Left');
+    this.alignCenter = this.t('По центру', 'Center');
+    this.alignRight = this.t('По правому краю', 'Right');
+    this.alignJustify = this.t('По ширине', 'Justify');
+    this.gapX = this.t('Минимальный интервал X, %', 'Minimum gap X, %');
+    this.gapY = this.t('Минимальный интервал Y, %', 'Minimum gap Y, %');
+    this.maxGap = this.t('Максимальное увеличение', 'Maximum increase');
+    this.maxGapY = this.t('Максимальное увеличение (Y)', 'Maximum increase (Y)');
+    this.gapHint = this.t(
+        'Интервалы могут увеличиваться для более полного заполнения выделенной области, но никогда не становятся меньше заданного минимума.',
+        'Gaps may increase to fill the selected area more fully, but never become smaller than the specified minimum.');
+    this.justifyGapHint = this.t(
+        'По ширине: горизонтальный интервал растягивается до границ выделения и не ограничивается максимальным множителем. Минимальный Gap X сохраняется; по Y действует обычный лимит.',
+        'Justify: the horizontal gap stretches to the selection edges and is not limited by the maximum multiplier. Minimum Gap X is preserved; the normal limit still applies to Y.');
+    this.pythonPacking = this.t('рассчитывать заполнение площадок в Python', 'calculate zone packing in Python');
+    this.pythonPackingTip = this.t(
+        'Более широкий поиск для составного выделения. При недоступности сервера расчёт выполняет JSX.',
+        'Broader search for compound selections. If the server is unavailable, JSX performs the calculation.');
+    this.alternateGender = this.t('чередовать мальчиков и девочек', 'alternate boys and girls');
+    this.headTurn = this.t('учитывать разворот тела и головы', 'consider body and head turn');
+    this.headTurnTip = this.t(
+        'Поворот лица, корпус и мягкое предпочтение наклона головы к центру. Запрокидывание не считается боковым поворотом.',
+        'Face turn, body orientation, and a soft preference for head tilt toward the center. Looking up or down is not treated as a side turn.');
+    this.colorTitle = this.t('Расстановка по цвету одежды:', 'Clothing color arrangement:');
+    this.colorTip = this.t(
+        'По всему листу, включая обмены между рядами и площадками. Близкие цвета рядом или контраст соседей; схема М/Д сохраняется, близкие повороты допускают обмен.',
+        'Across the whole sheet, including swaps between rows and zones. Similar colors can be kept together or neighboring contrast maximized; the boy/girl pattern is preserved and similar poses may swap.');
+    this.groupRows = this.t('объединять каждый ряд в группу', 'group each row');
+    this.saveAction = this.t('Сохранить настройки экшена', 'Save action settings');
+    this.layoutLayers = this.t('Разложить слои', 'Arrange layers');
+    this.lockAction = this.t('фиксировать отступы и трансформацию', 'lock gaps and transform');
+    this.lockActionTip = this.t(
+        'В экшен записываются реальный масштаб и интервалы X/Y. Число фотографий может меняться; параметры размера и интервалов сохраняются.',
+        'The actual scale and X/Y gaps are recorded in the action. The number of photos may change; size and gap parameters remain fixed.');
+    this.cancel = this.t('Отмена', 'Cancel');
+    this.colorOff = this.t('Не учитывать', 'Do not use');
+    this.colorHarmonious = this.t('Согласованные цвета', 'Harmonious colors');
+    this.colorContrast = this.t('Максимальный контраст', 'Maximum contrast');
+    this.pythonUnavailablePrefix = this.t('Python-функции недоступны: ', 'Python features are unavailable: ');
+    this.geometryWithoutPython = this.t('Обычная геометрическая раскладка работает без Python.', 'Standard geometric layout works without Python.');
 }
 
 function Config() {
@@ -822,7 +889,7 @@ function readSelectedLayerSnapshot() {
         var id = sel.getReference(i).getIdentifier(), d = lr.getDescriptor(id, false), itemIndex = NaN;
         if (d && d.hasKey(s2t('itemIndex'))) itemIndex = d.getInteger(s2t('itemIndex'));
         else itemIndex = Number(lr.getProperty('itemIndex', id));
-        if (!isFinite(itemIndex)) throw new Error('Не удалось определить положение выбранного слоя в палитре.');
+        if (!isFinite(itemIndex)) throw new Error(str.t('Не удалось определить положение выбранного слоя в палитре.', 'Could not determine the selected layer position in the Layers panel.'));
         selected.push({ id: id, itemIndex: itemIndex });
         if (d) descriptors[String(id)] = d;
     }
@@ -834,7 +901,7 @@ function readSelectedLayerSnapshot() {
 
 function collectDocumentState() {
     var snapshot = readSelectedLayerSnapshot(), ids = snapshot.ids;
-    if (!ids.length) throw new Error('Не выбраны слои для раскладки.');
+    if (!ids.length) throw new Error(str.t('Не выбраны слои для раскладки.', 'No layers are selected for layout.'));
 
     // Keep these exact descriptors for buildInputPreparation/collectLayoutItems.
     // This removes the former second ActionManager read of every selected layer.
@@ -881,7 +948,7 @@ function collectSelectionGeometryWithHistory() {
         // Restore the exact selection AND path before analysis and final Apply.
         try { activeDocument.activeHistoryState = originalHistory; }
         catch (restoreError) {
-            var error = new Error('Не удалось восстановить выделение после чтения пути: ' + restoreError.message);
+            var error = new Error(str.t('Не удалось восстановить выделение после чтения пути: ', 'Could not restore the selection after reading the path: ') + restoreError.message);
             error.autoLayoutRestoreFailure = true;
             throw error;
         }
@@ -889,7 +956,7 @@ function collectSelectionGeometryWithHistory() {
 }
 
 function collectSelectionGeometry() {
-    if (!doc.getProperty('selection')) throw new Error('Сначала создайте выделение из прямоугольных областей.')
+    if (!doc.getProperty('selection')) throw new Error(str.t('Сначала создайте выделение из прямоугольных областей.', 'First create a selection made of rectangular areas.'))
 
     var components,
         tempPathCreated = false;
@@ -898,7 +965,7 @@ function collectSelectionGeometry() {
         pth.makePathFromSelection(PATH_TOLERANCE)
         tempPathCreated = true
         var contents = pth.getProperty('pathContents');
-        if (!contents || !contents.value) throw new Error('Не удалось получить геометрию выделения.')
+        if (!contents || !contents.value) throw new Error(str.t('Не удалось получить геометрию выделения.', 'Could not read the selection geometry.'))
         components = pth.convertToObject(contents.value, 'pathComponents')
     } finally {
         // Work Path is only a temporary geometry carrier. Pixel selection itself
@@ -918,12 +985,12 @@ function collectSelectionGeometry() {
 
     var bounds = getContoursBounds(contours);
     if (bounds.width <= GEOMETRY_EPS || bounds.height <= GEOMETRY_EPS)
-        throw new Error('Размер выделения слишком мал.')
+        throw new Error(str.t('Размер выделения слишком мал.', 'The selection is too small.'))
 
     var bands = buildSelectionBandsFromContours(contours, GEOMETRY_EPS),
         isRectangle = contours.length == 1 && isRectangleContour(contours[0].points, bounds, GEOMETRY_EPS);
 
-    if (!bands.length) throw new Error('Не удалось построить горизонтальные полосы выделения.')
+    if (!bands.length) throw new Error(str.t('Не удалось построить горизонтальные полосы выделения.', 'Could not build horizontal bands for the selection.'))
 
     // Connectivity is derived from the filled horizontal intervals themselves,
     // not from Photoshop path direction. This lets us reliably distinguish
@@ -944,7 +1011,7 @@ function collectSelectionGeometry() {
         stableZones = multiZone ? buildStableLayoutZones(bands, selectionComponents, GEOMETRY_EPS) : [];
 
     if (multiZone && !stableZones.length)
-        throw new Error('Не удалось разделить выделение на доступные площадки.');
+        throw new Error(str.t('Не удалось разделить выделение на доступные площадки.', 'Could not split the selection into available layout zones.'));
 
     return {
         bounds: bounds,
@@ -1036,7 +1103,7 @@ function getContoursIntervalsAtY(contours, y, eps) {
 
     xs.sort(function (a, b) { return a - b })
     if (xs.length % 2)
-        throw new Error('Не удалось однозначно разобрать составное выделение. Проверьте, что оно создано только прямоугольными областями.')
+        throw new Error(str.t('Не удалось однозначно разобрать составное выделение. Проверьте, что оно создано только прямоугольными областями.', 'Could not parse the compound selection unambiguously. Make sure it was created using rectangular areas only.'))
 
     var intervals = [];
     for (i = 0; i < xs.length; i += 2) {
@@ -1516,7 +1583,7 @@ function getSelectionContours(components) {
         }
     }
 
-    if (!contours.length) throw new Error('Не удалось прочитать контур выделения.');
+    if (!contours.length) throw new Error(str.t('Не удалось прочитать контур выделения.', 'Could not read the selection contour.'));
     return contours;
 }
 
@@ -1555,7 +1622,7 @@ function normalizeContour(points, eps) {
 }
 
 function validateOrthogonalContour(points, eps) {
-    if (points.length < 4) throw new Error('Контур выделения содержит слишком мало точек.')
+    if (points.length < 4) throw new Error(str.t('Контур выделения содержит слишком мало точек.', 'The selection contour contains too few points.'))
 
     for (var i = 0; i < points.length; i++) {
         var a = points[i],
@@ -1564,7 +1631,7 @@ function validateOrthogonalContour(points, eps) {
             horizontal = near(a.y, b.y, eps);
 
         if (vertical == horizontal)
-            throw new Error('Auto Layout поддерживает только прямоугольную геометрию без диагоналей и кривых.')
+            throw new Error(str.t('Auto Layout поддерживает только прямоугольную геометрию без диагоналей и кривых.', 'Auto Layout supports rectangular geometry only, without diagonals or curves.'))
     }
 }
 
@@ -1700,7 +1767,7 @@ function readPreparationLayer(d, index) {
             var type = list.getType(i), linkedId;
             if (type == DescValueType.INTEGERTYPE) linkedId = list.getInteger(i);
             else if (type == DescValueType.REFERENCETYPE) linkedId = list.getReference(i).getIdentifier();
-            else throw new Error('Не удалось прочитать связи слоя "' + node.name + '".');
+            else throw new Error(str.t('Не удалось прочитать связи слоя "', 'Could not read links for layer "') + node.name + str.t('".', '".'));
             if (linkedId != node.id && !arrayContains(node.links, linkedId)) node.links.push(linkedId);
         }
     }
@@ -1711,20 +1778,20 @@ function collectPreparationLayers() {
     var from = doc.getProperty('hasBackgroundLayer') ? 0 : 1, to = doc.getProperty('numberOfLayers'),
         containers = [[]], nodes = [], byId = {};
     for (var i = from; i <= to; i++) {
-        if ((i - from) % 20 == 0) progress(0, 'Структура ' + (i - from) + '/' + (to - from + 1));
+        if ((i - from) % 20 == 0) progress(0, 'Structure ' + (i - from) + '/' + (to - from + 1));
         var d = lr.getDescriptor(i, true);
-        if (!d) throw new Error('Не удалось прочитать структуру слоёв.');
+        if (!d) throw new Error(str.t('Не удалось прочитать структуру слоёв.', 'Could not read the layer structure.'));
         var node = readPreparationLayer(d, i);
         if (node.section == 'layerSectionEnd') { containers.push([]); continue; }
         if (node.section == 'layerSectionStart') {
-            if (containers.length < 2) throw new Error('Нарушена структура групп документа.');
+            if (containers.length < 2) throw new Error(str.t('Нарушена структура групп документа.', 'The document group structure is invalid.'));
             node.children = containers.pop();
             for (var c = 0; c < node.children.length; c++) node.children[c].parentId = node.id;
         }
         nodes.push(node); byId[String(node.id)] = node;
         containers[containers.length - 1].push(node);
     }
-    if (containers.length != 1) throw new Error('Незавершённая структура групп документа.');
+    if (containers.length != 1) throw new Error(str.t('Незавершённая структура групп документа.', 'The document group structure is incomplete.'));
     return { nodes: nodes, byId: byId, roots: containers[0] };
 }
 
@@ -1734,9 +1801,9 @@ function buildInputPreparation(ids) {
     // preparation becomes necessary it is discarded before Photoshop changes it.
     selectedLayerDescriptorCache = null;
     for (var i = 0; i < ids.length; i++) {
-        if (i % 20 == 0) progress(0, 'Выбор ' + i + '/' + ids.length);
+        if (i % 20 == 0) progress(0, 'Selection ' + i + '/' + ids.length);
         var key = String(ids[i]), d = cache[key] || lr.getDescriptor(ids[i], false);
-        if (!d) throw new Error('Один из выбранных слоёв недоступен.');
+        if (!d) throw new Error(str.t('Один из выбранных слоёв недоступен.', 'One of the selected layers is unavailable.'));
         cache[key] = d;
         var node = readPreparationLayer(d, 0);
         if (node.section == 'layerSectionStart' || node.links.length) needed = true;
@@ -1751,7 +1818,7 @@ function buildInputPreparation(ids) {
 function planInputPreparation(tree, selectedIds) {
     var selected = {}, owner = {}, visited = {}, units = [], byId = tree.byId, incoming = {}, i, j;
     for (i = 0; i < selectedIds.length; i++) {
-        if (!byId[String(selectedIds[i])]) throw new Error('Выбранный слой отсутствует в структуре документа.');
+        if (!byId[String(selectedIds[i])]) throw new Error(str.t('Выбранный слой отсутствует в структуре документа.', 'A selected layer is missing from the document structure.'));
         selected[String(selectedIds[i])] = true;
     }
     for (i = 0; i < tree.nodes.length; i++) {
@@ -1763,7 +1830,7 @@ function planInputPreparation(tree, selectedIds) {
         owner[String(node.id)] = top;
         for (j = 0; j < node.links.length; j++) {
             var key = String(node.links[j]);
-            if (!byId[key]) throw new Error('Связь слоя "' + node.name + '" указывает на отсутствующий слой.');
+            if (!byId[key]) throw new Error(str.t('Связь слоя "', 'A link from layer "') + node.name + str.t('" указывает на отсутствующий слой.', '" points to a missing layer.'));
             if (!incoming[key]) incoming[key] = [];
             incoming[key].push(node.id);
         }
@@ -1800,16 +1867,16 @@ function planInputPreparation(tree, selectedIds) {
         }
         var convert = roots.length > 1 || roots[0].section == 'layerSectionStart';
         if (!convert && roots[0].kind != 1 && roots[0].kind != 4 && roots[0].kind != 5)
-            throw new Error('Слой "' + roots[0].name + '": включите текст/коррекцию в группу или связанный набор.');
+            throw new Error(str.t('Слой "', 'Layer "') + roots[0].name + str.t('": включите текст/коррекцию в группу или связанный набор.', '": include the text/adjustment layer in a group or linked set.'));
         var parentId = roots[0].parentId;
         for (j = 0; j < roots.length; j++) {
             node = roots[j];
-            if (node.artboard) throw new Error('Артборд нельзя преобразовать как обычную группу. Выберите группы внутри него.');
-            if (node.parentId != parentId) throw new Error('Связанные слои находятся в разных родительских группах. Объединение может изменить маски и оформление; перенесите набор в один контейнер.');
+            if (node.artboard) throw new Error(str.t('Артборд нельзя преобразовать как обычную группу. Выберите группы внутри него.', 'An artboard cannot be processed as a regular group. Select groups inside the artboard instead.'));
+            if (node.parentId != parentId) throw new Error(str.t('Связанные слои находятся в разных родительских группах. Объединение может изменить маски и оформление; перенесите набор в один контейнер.', 'Linked layers are in different parent groups. Combining them may change masks or appearance; move the set into one container.'));
             for (parent = node; parent; parent = parent.parentId == null ? null : byId[String(parent.parentId)])
                 if (parent.background || parent.locking.protectAll || parent.locking.protectPosition || parent.locking.protectComposite)
-                    throw new Error('Набор содержит заблокированный слой или родительскую группу "' + parent.name + '".');
-            if (node.section == 'layerSectionStart' && !node.children.length) throw new Error('Группа "' + node.name + '" пуста.');
+                    throw new Error(str.t('Набор содержит заблокированный слой или родительскую группу "', 'The set contains a locked layer or parent group "') + parent.name + str.t('".', '".'));
+            if (node.section == 'layerSectionStart' && !node.children.length) throw new Error(str.t('Группа "', 'Group "') + node.name + str.t('" пуста.', '" is empty.'));
         }
         var fallback = roots[0], rank = { '5': 4, '1': 3, '7': 2, '4': 1, '3': 0 };
         for (j = 1; j < roots.length; j++) if ((rank[String(roots[j].kind)] || 0) > (rank[String(fallback.kind)] || 0)) fallback = roots[j];
@@ -1833,7 +1900,7 @@ function validatePreparationContext(unit, tree) {
         while (siblings[i].clipped && i + 1 < siblings.length) chain.push(siblings[++i]);
         var included = 0;
         for (j = 0; j < chain.length; j++) if (roots[String(chain[j].id)]) included++;
-        if (included && (included != chain.length || chain[chain.length - 1].clipped)) throw new Error('Набор включает только часть цепочки обтравки. Добавьте её целиком в группу или связь.');
+        if (included && (included != chain.length || chain[chain.length - 1].clipped)) throw new Error(str.t('Набор включает только часть цепочки обтравки. Добавьте её целиком в группу или связь.', 'The set contains only part of a clipping chain. Include the entire chain in the group or linked set.'));
     }
     for (i = 0; i < unit.members.length; i++) {
         node = unit.members[i];
@@ -1847,7 +1914,7 @@ function validatePreparationContext(unit, tree) {
             if (roots[String(p.id)]) break;
             p = p.parentId == null ? null : tree.byId[String(p.parentId)];
         }
-        if (!isolated) throw new Error('Коррекция или режим наложения слоя "' + node.name + '" может влиять на слои вне набора. Изолируйте его в группе с обычным режимом наложения.');
+        if (!isolated) throw new Error(str.t('Коррекция или режим наложения слоя "', 'The adjustment or blend mode of layer "') + node.name + str.t('" может влиять на слои вне набора. Изолируйте его в группе с обычным режимом наложения.', '" may affect layers outside the set. Isolate it in a group using Normal blend mode.'));
     }
 }
 
@@ -1855,7 +1922,7 @@ function prepareLayoutSources() {
     var ids = [], activeId = null;
     for (var i = 0; i < inputPreparation.units.length; i++) {
         var unit = inputPreparation.units[i], roots = [];
-        layoutUnitProgress(i, inputPreparation.units.length, 'Объекты ' + i + '/' + inputPreparation.units.length);
+        layoutUnitProgress(i, inputPreparation.units.length, 'Objects ' + i + '/' + inputPreparation.units.length);
         for (var r = 0; r < unit.roots.length; r++) roots.push(unit.roots[r].id);
         lr.selectLayers(roots);
         if (unit.convert) {
@@ -1864,11 +1931,11 @@ function prepareLayoutSources() {
             lr.setLayerName(unit.name);
         }
         var id = lr.getProperty('layerID');
-        if (!isFinite(Number(id)) || (unit.convert && lr.getProperty('layerKind', id) != 5)) throw new Error('Не удалось подготовить смарт-объект "' + unit.name + '".');
+        if (!isFinite(Number(id)) || (unit.convert && lr.getProperty('layerKind', id) != 5)) throw new Error(str.t('Не удалось подготовить смарт-объект "', 'Could not prepare Smart Object "') + unit.name + str.t('".', '".'));
         ids.push(id);
         for (r = 0; r < unit.members.length; r++)
             if (unit.members[r].id == sourceState.originalActiveLayerId) activeId = id;
-        layoutUnitProgress(i + 1, inputPreparation.units.length, 'Объекты ' + (i + 1) + '/' + inputPreparation.units.length);
+        layoutUnitProgress(i + 1, inputPreparation.units.length, 'Objects ' + (i + 1) + '/' + inputPreparation.units.length);
     }
     sourceState.layerIds = ids;
     sourceState.activeLayerId = activeId == null ? ids[0] : activeId;
@@ -1877,7 +1944,7 @@ function prepareLayoutSources() {
 
 function commitPreparedLayout() {
     var preparedMap = null;
-    runLayoutProgressStage('Восстановление исходных объектов', function () {
+    runLayoutProgressStage('Restoring source objects', function () {
         preparedMap = buildPreparedOriginalMap();
         validateOriginalPreparationUnits(preparedMap);
         // The temporary proxy IDs disappeared when main() restored the original
@@ -1885,14 +1952,14 @@ function commitPreparedLayout() {
         // to the user's original layers/groups again.
         sourceState.layerIds = sourceState.originalLayerIds.slice(0);
         sourceState.activeLayerId = sourceState.originalActiveLayerId;
-        layoutUnitProgress(1, 1, 'Исходные группы и связи восстановлены');
+        layoutUnitProgress(1, 1, 'Source groups and links restored');
     });
     applyPreparedLayoutPlan(preparedMap);
 }
 
 function buildPreparedOriginalMap() {
     if (!inputPreparation || !preparedAnalysisItems || inputPreparation.units.length != preparedAnalysisItems.length)
-        throw new Error('Потеряно соответствие временных объектов исходным группам.');
+        throw new Error(str.t('Потеряно соответствие временных объектов исходным группам.', 'The mapping between temporary objects and source groups was lost.'));
 
     var byProxyId = {}, placementByProxyId = {}, i;
     for (i = 0; i < layoutPlan.placements.length; i++)
@@ -1901,7 +1968,7 @@ function buildPreparedOriginalMap() {
     for (i = 0; i < inputPreparation.units.length; i++) {
         var unit = inputPreparation.units[i], proxy = preparedAnalysisItems[i], roots = [], r;
         if (!proxy || placementByProxyId[String(proxy.id)] == undefined)
-            throw new Error('Потеряно соответствие позиции объекту "' + (unit.name || '') + '".');
+            throw new Error(str.t('Потеряно соответствие позиции объекту "', 'The position mapping was lost for object "') + (unit.name || '') + str.t('".', '".'));
         for (r = 0; r < unit.roots.length; r++) roots.push(unit.roots[r].id);
         byProxyId[String(proxy.id)] = {
             unit: unit,
@@ -1920,29 +1987,29 @@ function validateOriginalPreparationUnits(preparedMap) {
     for (proxyKey in preparedMap) if (preparedMap.hasOwnProperty(proxyKey)) {
         mapped++;
         var entry = preparedMap[proxyKey];
-        if (!entry.roots.length) throw new Error('У подготовленного объекта отсутствуют исходные слои.');
+        if (!entry.roots.length) throw new Error(str.t('У подготовленного объекта отсутствуют исходные слои.', 'A prepared object has no source layers.'));
         for (r = 0; r < entry.unit.roots.length; r++) {
             var original = entry.unit.roots[r], key = String(original.id), d = lr.getDescriptor(original.id, false);
-            if (!d) throw new Error('Исходный слой "' + original.name + '" не восстановился.');
+            if (!d) throw new Error(str.t('Исходный слой "', 'Source layer "') + original.name + str.t('" не восстановился.', '" was not restored.'));
             var current = readPreparationLayer(d, original.itemIndex);
             if (!current || current.section == 'layerSectionEnd' || current.name != original.name || current.kind != original.kind)
-                throw new Error('Исходная группа/слой "' + original.name + '" восстановилась в другом состоянии. Раскладка остановлена.');
-            if (usedRoots[key]) throw new Error('Один исходный слой попал сразу в несколько объектов раскладки.');
+                throw new Error(str.t('Исходная группа/слой "', 'Source group/layer "') + original.name + str.t('" восстановилась в другом состоянии. Раскладка остановлена.', '" was restored in a different state. Layout has been stopped.'));
+            if (usedRoots[key]) throw new Error(str.t('Один исходный слой попал сразу в несколько объектов раскладки.', 'One source layer was assigned to multiple layout objects.'));
             usedRoots[key] = true;
         }
     }
     if (mapped != inputPreparation.units.length || mapped != layoutPlan.placements.length)
-        throw new Error('Количество исходных объектов не совпадает с рассчитанной раскладкой.');
+        throw new Error(str.t('Количество исходных объектов не совпадает с рассчитанной раскладкой.', 'The number of source objects does not match the calculated layout.'));
 }
 
 function getPreparedUnitTransformBounds(rootIds) {
     var result = null;
     for (var i = 0; i < rootIds.length; i++) {
         var property = lr.getProperty('boundsNoEffects', rootIds[i]);
-        if (!property || !property.value) throw new Error('Не удалось получить границы исходной группы/слоя.');
+        if (!property || !property.value) throw new Error(str.t('Не удалось получить границы исходной группы/слоя.', 'Could not get the bounds of the source group/layer.'));
         var b = lr.descToObject(property.value), left = Number(b.left), top = Number(b.top), right = Number(b.right), bottom = Number(b.bottom);
         if (!isFinite(left) || !isFinite(top) || !isFinite(right) || !isFinite(bottom) || right <= left || bottom <= top)
-            throw new Error('Исходная группа/слой имеет некорректные границы трансформации.');
+            throw new Error(str.t('Исходная группа/слой имеет некорректные границы трансформации.', 'The source group/layer has invalid transform bounds.'));
         if (!result) result = { left: left, top: top, right: right, bottom: bottom };
         else {
             if (left < result.left) result.left = left;
@@ -1957,17 +2024,17 @@ function getPreparedUnitTransformBounds(rootIds) {
 }
 
 function applyPreparedLayoutPlan(preparedMap) {
-    if (!preparedMap) throw new Error('Нет соответствия исходным группам.');
+    if (!preparedMap) throw new Error(str.t('Нет соответствия исходным группам.', 'Source group mapping is missing.'));
     var scale = layoutPlan.commonScale, total = layoutPlan.placements.length, i;
-    if (!isFinite(scale) || scale <= 0) throw new Error('Некорректный общий масштаб.');
+    if (!isFinite(scale) || scale <= 0) throw new Error(str.t('Некорректный общий масштаб.', 'Invalid common scale.'));
 
     // Derive one affine transform per original layout-unit. The temporary proxy
     // defines the visual bbox, while QCSAverage uses the native root-set bbox as
     // the transform centre. The offset below compensates that difference exactly.
-    runLayoutProgressStage('Расчёт трансформаций объектов', function () {
+    runLayoutProgressStage('Calculating object transforms', function () {
         for (i = 0; i < total; i++) {
             var p = layoutPlan.placements[i], entry = preparedMap[String(p.layerId)];
-            if (!entry) throw new Error('Не найден исходный объект для "' + p.name + '".');
+            if (!entry) throw new Error(str.t('Не найден исходный объект для "', 'Source object not found for "') + p.name + str.t('".', '".'));
             layoutUnitProgress(i, total, i + '/' + total);
             lr.selectLayers(entry.roots);
             var transformBounds = getPreparedUnitTransformBounds(entry.roots),
@@ -1977,12 +2044,12 @@ function applyPreparedLayoutPlan(preparedMap) {
             entry.transformOffsetX = p.left - scaledProxyLeft;
             entry.transformOffsetY = p.top - scaledProxyTop;
             if (!isFinite(entry.transformOffsetX) || !isFinite(entry.transformOffsetY))
-                throw new Error('Не удалось рассчитать трансформацию исходного объекта "' + p.name + '".');
+                throw new Error(str.t('Не удалось рассчитать трансформацию исходного объекта "', 'Could not calculate the transform for source object "') + p.name + str.t('".', '".'));
             layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
         }
     });
 
-    runLayoutProgressStage('Трансформация исходных объектов', function () {
+    runLayoutProgressStage('Transforming source objects', function () {
         for (i = 0; i < total; i++) {
             var p = layoutPlan.placements[i], entry = preparedMap[String(p.layerId)];
             layoutUnitProgress(i, total, i + '/' + total);
@@ -1993,7 +2060,7 @@ function applyPreparedLayoutPlan(preparedMap) {
         }
     });
 
-    if (cfg.groupRows) runLayoutProgressStage('Группировка рядов', function () { groupLayoutRows(layoutPlan.rows, preparedMap); });
+    if (cfg.groupRows) runLayoutProgressStage('Grouping rows', function () { groupLayoutRows(layoutPlan.rows, preparedMap); });
 }
 
 function readLayoutLayerDescriptor(d, fallbackId, order) {
@@ -2007,7 +2074,7 @@ function readLayoutLayerDescriptor(d, fallbackId, order) {
         return NaN;
     }
 
-    if (!d) throw new Error('Один из выбранных слоёв недоступен.');
+    if (!d) throw new Error(str.t('Один из выбранных слоёв недоступен.', 'One of the selected layers is unavailable.'));
     var id = has('layerID') ? d.getInteger(s2t('layerID')) : fallbackId,
         name = has('name') ? d.getString(s2t('name')) : '',
         kind = has('layerKind') ? d.getInteger(s2t('layerKind')) : 7,
@@ -2017,15 +2084,15 @@ function readLayoutLayerDescriptor(d, fallbackId, order) {
         boundsDesc = has('boundsNoEffects') ? d.getObjectValue(s2t('boundsNoEffects')) : null;
 
     if (kind != 1 && kind != 4 && kind != 5)
-        throw new Error('Слой "' + name + '" имеет неподдерживаемый тип. Используются пиксельные слои, векторные shape-слои и Smart Object.');
+        throw new Error(str.t('Слой "', 'Layer "') + name + str.t('" имеет неподдерживаемый тип. Используются пиксельные слои, векторные shape-слои и Smart Object.', '" has an unsupported type. Pixel layers, vector shape layers, and Smart Objects are supported.'));
     if (background)
-        throw new Error('Фоновый слой "' + name + '" нельзя перемещать. Сначала преобразуйте его в обычный слой.');
+        throw new Error(str.t('Фоновый слой "', 'Background layer "') + name + str.t('" нельзя перемещать. Сначала преобразуйте его в обычный слой.', '" cannot be moved. Convert it to a regular layer first.'));
     if (locking && (locking.protectAll || locking.protectPosition || locking.protectComposite))
-        throw new Error('Слой "' + name + '" заблокирован для перемещения или трансформации.');
+        throw new Error(str.t('Слой "', 'Layer "') + name + str.t('" заблокирован для перемещения или трансформации.', '" is locked against moving or transforming.'));
     if (!boundsDesc)
-        throw new Error('Не удалось получить boundsNoEffects слоя "' + name + '".');
+        throw new Error(str.t('Не удалось получить boundsNoEffects слоя "', 'Could not get boundsNoEffects for layer "') + name + str.t('".', '".'));
     if (!isFinite(itemIndex))
-        throw new Error('Не удалось получить позицию слоя "' + name + '" в палитре слоёв.');
+        throw new Error(str.t('Не удалось получить позицию слоя "', 'Could not get the Layers panel position of layer "') + name + str.t('" в палитре слоёв.', '".'));
 
     var bounds = {
         left: numberFrom(boundsDesc, 'left'),
@@ -2038,7 +2105,7 @@ function readLayoutLayerDescriptor(d, fallbackId, order) {
     bounds.centerX = bounds.left + bounds.width / 2;
     bounds.centerY = bounds.top + bounds.height / 2;
     if (!isFinite(bounds.width) || !isFinite(bounds.height) || bounds.width <= 0 || bounds.height <= 0)
-        throw new Error('Слой "' + name + '" имеет некорректный bounding box.');
+        throw new Error(str.t('Слой "', 'Layer "') + name + str.t('" имеет некорректный bounding box.', '" has an invalid bounding box.'));
 
     return {
         id: id, name: name, kind: kind, order: order, itemIndex: itemIndex,
@@ -2055,10 +2122,10 @@ function collectLayoutItems(ids) {
 
     for (var i = 0; i < count; i++) {
         var id = ids[i];
-        progress(8 + 22 * (i / Math.max(1, count)), 'Слои ' + i + '/' + count);
+        progress(8 + 22 * (i / Math.max(1, count)), 'Layers ' + i + '/' + count);
         var d = cache && cache[String(id)] ? cache[String(id)] : lr.getDescriptor(id, false);
         output.push(readLayoutLayerDescriptor(d, id, i));
-        progress(8 + 22 * ((i + 1) / Math.max(1, count)), 'Слои ' + (i + 1) + '/' + count);
+        progress(8 + 22 * ((i + 1) / Math.max(1, count)), 'Layers ' + (i + 1) + '/' + count);
     }
     return output;
 }
@@ -2096,7 +2163,7 @@ function analyzeSemantics(items) {
                 result = nameCall.value[i];
                 if (result && result.id != undefined) byId[String(result.id)] = result;
             }
-        } else if (nameCall.ok) pythonFeatures.recordFailure('gender_names_invalid', 'Некорректный ответ анализа имён.');
+        } else if (nameCall.ok) pythonFeatures.recordFailure('gender_names_invalid', str.t('Некорректный ответ анализа имён.', 'Invalid name-analysis response.'));
         for (i = 0; i < items.length; i++) applyGenderResult(items[i], byId[String(items[i].id)]);
     }
     setLayoutProgressRange(.1, .9); // Reserve initialization/name analysis before the per-photo slices.
@@ -2118,7 +2185,7 @@ function analyzeSemantics(items) {
                     wantHead = headReady && !headTurnFeatures.isDisabled(),
                     wantColor = colorReady && !colorFeatures.isDisabled();
                 if (!wantGender && !wantHead && !wantColor) continue;
-                progress(30 + 2 * i / Math.max(1, photoItems.length), 'Фото ' + i + '/' + photoItems.length);
+                progress(30 + 2 * i / Math.max(1, photoItems.length), 'Photo ' + i + '/' + photoItems.length);
                 var previewPath = null;
                 try {
                     previewHistoryTouched = true;
@@ -2213,7 +2280,7 @@ function analyzeSemantics(items) {
                     if (previewPath && !removePreview(previewPath)) {
                         try { pythonApi.cleanup(previewPath); } catch (cleanupError) { }
                     }
-                    progress(30 + 2 * (i + 1) / Math.max(1, photoItems.length), 'Фото ' + (i + 1) + '/' + photoItems.length);
+                    progress(30 + 2 * (i + 1) / Math.max(1, photoItems.length), 'Photo ' + (i + 1) + '/' + photoItems.length);
                 }
                 if (semanticImageAnalysisDisabledForRun) break;
             }
@@ -2221,7 +2288,7 @@ function analyzeSemantics(items) {
             restoreAnalysisHistory(parentDocumentId, analysisBaseHistory, false);
         }
     }
-    progress(32, 'Анализ завершён');
+    progress(32, 'Analysis complete');
     return {
         gender: cfg.alternateGender ? finalizeGenderSummary(items, !genderReady || pythonFeatures.isDisabled()) : null,
         headTurn: cfg.considerHeadTurn ? finalizeHeadTurnSummary(items, !headReady || headTurnFeatures.isDisabled()) : null,
@@ -2241,8 +2308,8 @@ function recordSemanticImageOutcome(hasUsefulValue) {
     if (semanticImageEmptyStreak < OPTIONAL_PYTHON_EMPTY_LIMIT) return;
 
     semanticImageAnalysisDisabledForRun = true;
-    semanticImageFallbackReason = 'Покадровый Python-анализ отключён до конца запуска после ' +
-        OPTIONAL_PYTHON_EMPTY_LIMIT + ' последовательных слоёв без полезного результата запрошенных признаков.';
+    semanticImageFallbackReason = str.t('Покадровый Python-анализ отключён до конца запуска после ', 'Per-image Python analysis was disabled for the rest of this run after ') +
+        OPTIONAL_PYTHON_EMPTY_LIMIT + str.t(' последовательных слоёв без полезного результата запрошенных признаков.', ' consecutive layers returned no useful result for the requested features.');
     // Once the input looks like non-photographic frames, do not spend more time
     // on the optional Python packing either. The JSX geometry core remains active.
     packingDisabledForRun = true;
@@ -2251,9 +2318,9 @@ function recordSemanticImageOutcome(hasUsefulValue) {
 
 function classifyColorOutcome(result) {
     if (!result || !/^(ok|uncertain|technical_failure)$/.test(String(result.analysis_status)))
-        return { failure: true, reason: 'color_invalid', message: 'Некорректный результат оценки цвета.' };
+        return { failure: true, reason: 'color_invalid', message: str.t('Некорректный результат оценки цвета.', 'Invalid color-analysis result.') };
     if (result.analysis_status == 'technical_failure')
-        return { failure: true, reason: result.reason || 'color_failed', message: result.message || 'Не удалось оценить цвета одежды.' };
+        return { failure: true, reason: result.reason || 'color_failed', message: result.message || str.t('Не удалось оценить цвета одежды.', 'Could not analyze clothing colors.') };
     if (result.analysis_status == 'uncertain') return { failure: false };
     var p = result.palette, sum = 0;
     if (!p || !p.length || p.length > 4) return { failure: true, reason: 'color_invalid' };
@@ -2449,13 +2516,13 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
     // Preserve gender composition and symmetry; allow bounded pose alternatives.
     // Trials use the same reflow/containment validator and unchanged scale/gaps.
     for (var pass = 0; pass < 8; pass++) {
-        layoutUnitProgress(pass, 8, 'Цвет: проход ' + (pass + 1) + ' из максимум 8');
+        layoutUnitProgress(pass, 8, 'Color: pass ' + (pass + 1) + ' of max 8');
         var changed = false;
         // Every photo participates, including sheets above 80 items. Large
         // sheets use globally spaced partners, not a fixed subset of photos.
         var search = slots, partnerCount = Math.min(16, Math.max(0, slots.length - 1));
         for (var a = 0; a < search.length; a++) {
-          if (a % 8 == 0) layoutUnitProgress(pass + a / Math.max(1, search.length), 8, 'Цвет: проход ' + (pass + 1) + ', позиции ' + a + '/' + search.length);
+          if (a % 8 == 0) layoutUnitProgress(pass + a / Math.max(1, search.length), 8, 'Color: pass ' + (pass + 1) + ', positions ' + a + '/' + search.length);
           for (var pairIndex = 0; pairIndex < (slots.length > 80 ? partnerCount : search.length - a - 1); pairIndex++) {
             var b = slots.length > 80 ? (a + 1 + (Math.floor(pairIndex * (slots.length - 1) / partnerCount) + pass) % (slots.length - 1)) % slots.length : a + 1 + pairIndex;
             var sa = search[a], sb = search[b], ia = best.rows[sa.row].items[sa.col], ib = best.rows[sb.row].items[sb.col];
@@ -2476,7 +2543,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
         }
         }
         if (!changed) break;
-        progress(currentProgressValue, 'Согласование цветов: ' + (pass + 1));
+        progress(currentProgressValue, 'Color optimization: ' + (pass + 1));
     }
     validateLayoutPlan(best, geometry);
     if (best == plan) { best = {}; for (var key in plan) if (plan.hasOwnProperty(key)) best[key] = plan[key]; }
@@ -2499,12 +2566,12 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
 
 function classifyHeadTurnOutcome(result) {
     if (!result || !/^(ok|uncertain|not_applicable|technical_failure)$/.test(String(result.analysis_status)))
-        return { failure: true, reason: 'head_result_invalid', message: 'Некорректный ответ анализа поворота головы.' };
+        return { failure: true, reason: 'head_result_invalid', message: str.t('Некорректный ответ анализа поворота головы.', 'Invalid head-turn analysis response.') };
     if (result.analysis_status == 'ok' && (typeof result.turn != 'number' || !isFinite(result.turn) || Math.abs(result.turn) > 80))
-        return { failure: true, reason: 'head_result_invalid', message: 'Некорректный угол поворота головы.' };
+        return { failure: true, reason: 'head_result_invalid', message: str.t('Некорректный угол поворота головы.', 'Invalid head-turn angle.') };
     if (result.analysis_status == 'not_applicable') return { failure: false };
     if (result.analysis_status == 'technical_failure')
-        return { failure: true, reason: result.reason || 'head_analysis_failed', message: result.message || 'Не удалось оценить поворот головы.' };
+        return { failure: true, reason: result.reason || 'head_analysis_failed', message: result.message || str.t('Не удалось оценить поворот головы.', 'Could not analyze head turn.') };
     return { failure: false };
 }
 
@@ -2540,13 +2607,13 @@ function classifyPhotoAnalysisOutcome(result) {
     if (!result || (result.sex != 'M' && result.sex != 'F' && result.sex != 'U') ||
         !isFinite(Number(result.confidence)) || Number(result.confidence) < 0 || Number(result.confidence) > 1 ||
         !/^(ok|uncertain|technical_failure|not_applicable)$/.test(String(result.analysis_status)))
-        return { failure: true, reason: 'invalid_result', message: 'Python вернул некорректный результат анализа изображения.' };
+        return { failure: true, reason: 'invalid_result', message: str.t('Python вернул некорректный результат анализа изображения.', 'Python returned an invalid image-analysis result.') };
 
     var status = result.analysis_status ? String(result.analysis_status) : '',
         reason = result.reason ? String(result.reason) : '';
 
     if ((status == 'ok' && result.sex == 'U') || ((status == 'uncertain' || status == 'not_applicable') && result.sex != 'U'))
-        return { failure: true, reason: 'invalid_result', message: 'Несогласованный результат анализа изображения.' };
+        return { failure: true, reason: 'invalid_result', message: str.t('Несогласованный результат анализа изображения.', 'Inconsistent image-analysis result.') };
 
     if (status == 'technical_failure')
         return { failure: true, reason: reason || 'technical_failure', message: photoAnalysisReasonText(reason, true) };
@@ -2560,14 +2627,14 @@ function classifyPhotoAnalysisOutcome(result) {
 
 function photoAnalysisReasonText(reason, technical) {
     switch (reason) {
-        case 'face_not_found': return 'лицо не найдено';
-        case 'face_low_confidence': return 'лицо найдено недостаточно уверенно';
-        case 'multiple_faces': return 'обнаружено несколько сопоставимых лиц';
-        case 'image_too_small': return 'изображение слишком мало для анализа';
-        case 'face_crop_too_small': return 'область лица слишком мала для анализа';
-        case 'image_read_failed': return 'Python не смог прочитать превью';
-        case 'classifier_output_invalid': return 'модель вернула некорректный результат';
-        default: return technical ? 'техническая ошибка анализа изображения' : 'изображение не подходит для этого анализа';
+        case 'face_not_found': return str.t('лицо не найдено', 'face not found');
+        case 'face_low_confidence': return str.t('лицо найдено недостаточно уверенно', 'face confidence is too low');
+        case 'multiple_faces': return str.t('обнаружено несколько сопоставимых лиц', 'multiple comparable faces detected');
+        case 'image_too_small': return str.t('изображение слишком мало для анализа', 'image is too small for analysis');
+        case 'face_crop_too_small': return str.t('область лица слишком мала для анализа', 'face crop is too small for analysis');
+        case 'image_read_failed': return str.t('Python не смог прочитать превью', 'Python could not read the preview');
+        case 'classifier_output_invalid': return str.t('модель вернула некорректный результат', 'the model returned an invalid result');
+        default: return technical ? str.t('техническая ошибка анализа изображения', 'technical image-analysis error') : str.t('изображение не подходит для этого анализа', 'image is not suitable for this analysis');
     }
 }
 
@@ -2613,10 +2680,10 @@ function applyGenderResult(item, result) {
 function restoreAnalysisHistory(parentDocumentId, anchorHistory, usePrevious) {
     try {
         if (doc.getProperty('documentID') != parentDocumentId) doc.close(false);
-        if (doc.getProperty('documentID') != parentDocumentId) throw new Error('Исходный документ недоступен.');
+        if (doc.getProperty('documentID') != parentDocumentId) throw new Error(str.t('Исходный документ недоступен.', 'The source document is unavailable.'));
         if (usePrevious) doc.selectPreviousHistoryState();
         else if (anchorHistory) activeDocument.activeHistoryState = anchorHistory;
-        else throw new Error('Точка восстановления истории недоступна.');
+        else throw new Error(str.t('Точка восстановления истории недоступна.', 'The history restore point is unavailable.'));
         return;
     } catch (historyError) {
         // A failed previous-state rollback may still recover through the anchor.
@@ -2626,7 +2693,7 @@ function restoreAnalysisHistory(parentDocumentId, anchorHistory, usePrevious) {
             activeDocument.activeHistoryState = anchorHistory;
             return;
         } catch (restoreError) {
-            var error = new Error('Не удалось восстановить документ после анализа фото. Раскладка остановлена: ' + restoreError.message);
+            var error = new Error(str.t('Не удалось восстановить документ после анализа фото. Раскладка остановлена: ', 'Could not restore the document after photo analysis. Layout has been stopped: ') + restoreError.message);
             error.autoLayoutRestoreFailure = true;
             throw error;
         }
@@ -2645,7 +2712,7 @@ function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
         restoreAnalysisHistory(parentDocumentId, analysisAnchorHistory, previewStateCreated);
     }
 
-    if (!result.path) throw new Error('Не удалось создать превью слоя "' + item.name + '".');
+    if (!result.path) throw new Error(str.t('Не удалось создать превью слоя "', 'Could not create a preview for layer "') + item.name + str.t('".', '".'));
     return result.path;
 
     function makePreview(o) {
@@ -2695,12 +2762,12 @@ function refreshLayoutLayerReferences(items) {
         if (!valid) {
             resolvedId = lr.getProperty('layerID', item.itemIndex, true);
             if (resolvedId === false || resolvedId == undefined)
-                throw new Error('После подготовки превью Photoshop потерял ссылку на слой "' + item.name + '".');
+                throw new Error(str.t('После подготовки превью Photoshop потерял ссылку на слой "', 'After preparing the preview, Photoshop lost the reference to layer "') + item.name + str.t('".', '".'));
 
             var resolved = readIdentity(resolvedId);
             if (!resolved || resolved.name === null || resolved.itemIndex === null ||
                 String(resolved.name) != String(item.name) || Number(resolved.itemIndex) != Number(item.itemIndex))
-                throw new Error('После подготовки превью не удалось безопасно восстановить слой "' + item.name + '".');
+                throw new Error(str.t('После подготовки превью не удалось безопасно восстановить слой "', 'After preparing the preview, layer "') + item.name + str.t('" не удалось безопасно восстановить.', '" could not be restored safely.'));
             item.id = resolvedId;
         }
 
@@ -2718,7 +2785,7 @@ function refreshLayoutLayerReferences(items) {
 
 function validateSourceLayersBeforeApply() {
     if (!sourceState || !sourceState.layerIds || !sourceState.layerIds.length)
-        throw new Error('Не удалось восстановить выбранные слои перед применением раскладки.');
+        throw new Error(str.t('Не удалось восстановить выбранные слои перед применением раскладки.', 'Could not restore the selected layers before applying the layout.'));
 
     var seen = {}, placementIds = {}, i;
     for (i = 0; i < layoutPlan.placements.length; i++) placementIds[String(layoutPlan.placements[i].layerId)] = true;
@@ -2727,12 +2794,12 @@ function validateSourceLayersBeforeApply() {
         var id = sourceState.layerIds[i],
             key = String(id),
             kind = lr.getProperty('layerKind', id);
-        if (seen[key]) throw new Error('Перед применением раскладки обнаружена повторная ссылка на слой ID ' + id + '.');
+        if (seen[key]) throw new Error(str.t('Перед применением раскладки обнаружена повторная ссылка на слой ID ', 'A duplicate layer reference was found before applying the layout. Layer ID ') + id + '.');
         seen[key] = true;
         if (kind != 1 && kind != 4 && kind != 5)
-            throw new Error('Один из исходных слоёв недоступен после анализа. Раскладка не применена.');
+            throw new Error(str.t('Один из исходных слоёв недоступен после анализа. Раскладка не применена.', 'One of the source layers is unavailable after analysis. The layout was not applied.'));
         if (!placementIds[key])
-            throw new Error('План раскладки потерял соответствие с исходным слоем ID ' + id + '.');
+            throw new Error(str.t('План раскладки потерял соответствие с исходным слоем ID ', 'The layout plan lost its mapping to source layer ID ') + id + '.');
     }
 }
 
@@ -2929,7 +2996,7 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
     // Reuse candidates that were already rebuilt for the immediate head-order
     // follow-up instead of rebuilding the same assignment twice.
     for (var pass = 0; pass < 12; pass++) {
-        layoutUnitProgress(pass, 12, 'М/Д и поза: проход ' + (pass + 1) + ' из максимум 12');
+        layoutUnitProgress(pass, 12, 'Gender and pose: pass ' + (pass + 1) + ' of max 12');
         var roundBest = best, roundScore = bestScore, baseRows = copyRows(best), rowWidths = [];
         for (r = 0; r < baseRows.length; r++) {
             var rawWidth = 0;
@@ -2987,7 +3054,7 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
             }
         }
         if (useGender || useHead) for (var a = 0; a < searchSlots.length; a++) {
-            if ((a % 8) == 0) layoutUnitProgress(pass + a / Math.max(1, searchSlots.length), 12, 'М/Д и поза: проход ' + (pass + 1) + ', позиции ' + a + '/' + searchSlots.length);
+            if ((a % 8) == 0) layoutUnitProgress(pass + a / Math.max(1, searchSlots.length), 12, 'Gender and pose: pass ' + (pass + 1) + ', positions ' + a + '/' + searchSlots.length);
             for (var b = a + 1; b < searchSlots.length; b++) {
                 var sa = searchSlots[a], sb = searchSlots[b], ai = baseRows[sa.row][sa.column], bi = baseRows[sb.row][sb.column];
                 var genderChange = useGender && ai.gender != bi.gender,
@@ -3621,18 +3688,18 @@ function buildLayoutPlan(items, geometry) {
     if (geometry.multiZone) {
         var accelerated = tryPythonZoneLayout(items, geometry, baseGapX, baseGapY);
         if (accelerated) return accelerated;
-        progress(32, 'Распределение по площадкам...')
+        progress(32, 'Distributing across zones...')
         var multi = buildMultiZoneLayoutFast(items, geometry, baseGapX, baseGapY);
-        if (!multi) throw new Error('Не удалось распределить слои по отдельным площадкам выделения.')
+        if (!multi) throw new Error(str.t('Не удалось распределить слои по отдельным площадкам выделения.', 'Could not distribute layers across the separate selection zones.'))
         multi.autoRows = cfg.autoRows
         if (cfg.pythonPacking) multi.packingFallbackReason = packingFallbackReason;
         return multi
     }
 
     if (!geometry.isRectangle) {
-        progress(32, 'Расчёт формы выделения...')
+        progress(32, 'Calculating selection shape...')
         var shaped = buildShapedLayoutFast(items, geometry, baseGapX, baseGapY);
-        if (!shaped) throw new Error('Не удалось подобрать раскладку для формы выделения.')
+        if (!shaped) throw new Error(str.t('Не удалось подобрать раскладку для формы выделения.', 'Could not find a layout for the selection shape.'))
         shaped.autoRows = cfg.autoRows
         return shaped
     }
@@ -3644,7 +3711,7 @@ function buildLayoutPlan(items, geometry) {
         tested = 0;
 
     for (var rowsCount = minRows; rowsCount <= maxRows; rowsCount++) {
-        progress(32 + 23 * (tested / Math.max(1, candidates)), 'Проверено ' + tested + '/' + candidates + '; ' + rowsCount + ' рядов')
+        progress(32 + 23 * (tested / Math.max(1, candidates)), 'Checked ' + tested + '/' + candidates + '; ' + rowsCount + ' rows')
 
         var distribution = getPreferredRowDistribution(items.length, rowsCount, cfg.rowRhythm),
             candidate = buildRectangularLayoutCandidate(items, geometry, distribution, baseGapX, baseGapY);
@@ -3653,10 +3720,10 @@ function buildLayoutPlan(items, geometry) {
         tested++
     }
 
-    progress(55, 'Выбор лучшей раскладки...')
+    progress(55, 'Choosing best layout...')
 
     if (!best)
-        throw new Error('Не удалось подобрать подходящее количество рядов.')
+        throw new Error(str.t('Не удалось подобрать подходящее количество рядов.', 'Could not find a suitable number of rows.'))
 
     best.autoRows = cfg.autoRows
     best.testedRows = tested
@@ -3889,7 +3956,7 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
     if (!rowSpecs || !rowSpecs.length) return null;
 
     if (lockedLayoutActive()) {
-        if (Math.abs(commonScale - actionLayoutProfile.scale) > 1e-9) throw new Error('Изменился масштаб, зафиксированный в экшене.');
+        if (Math.abs(commonScale - actionLayoutProfile.scale) > 1e-9) throw new Error(str.t('Изменился масштаб, зафиксированный в экшене.', 'The scale locked in the action has changed.'));
         actualGapY = actionLayoutProfile.gapY;
         fixedGapPolicy = lockedGapPolicy(rowSpecs, actionLayoutProfile);
     }
@@ -4106,7 +4173,7 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY) {
     var init = pythonApi.tryInit();
     if (!init || !init.ok) {
         packingDisabledForRun = true;
-        packingFallbackReason = init && init.message ? init.message : 'Python недоступен.';
+        packingFallbackReason = init && init.message ? init.message : str.t('Python недоступен.', 'Python is unavailable.');
         return null;
     }
     try {
@@ -4114,14 +4181,14 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY) {
         for (i = 0; i < items.length; i++) data.push({ id: items[i].id, width: items[i].width, height: items[i].height });
         for (i = 0; i < zones.length; i++) zoneData.push({ left: zones[i].left, top: zones[i].top,
             right: zones[i].right, bottom: zones[i].bottom, componentIndex: zones[i].componentIndex });
-        progress(32, 'Python: поиск заполнения площадок...');
+        progress(32, 'Python: searching zone packing...');
         beginPythonProgressWait(1, 8000);
         var answer = pythonApi.sendPayload('layout_zones', { items: data, zones: zoneData,
             baseGapX: baseGapX, baseGapY: baseGapY, maxGapMultiplier: cfg.maxGapMultiplier,
             horizontalAlign: cfg.horizontalAlign, rowRhythm: cfg.rowRhythm,
             rows: cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)) }, { longRequest: true });
         var plan = decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGapY);
-        progress(55, 'Python: раскладка проверена.');
+        progress(55, 'Python: layout validated.');
         return plan;
     } catch (e) {
         if (e.number == 8007) throw e;
@@ -4136,34 +4203,34 @@ function decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGa
     if (!answer || answer.status != 'ok' || !numeric(answer.commonScale) || answer.commonScale <= 0 ||
         !numeric(answer.gapY) || answer.gapY < 0 || !answer.rows || !answer.rows.length || answer.rows.length > items.length ||
         !answer.placements || answer.placements.length != items.length)
-        throw new Error('Python не вернул допустимую раскладку.');
+        throw new Error(str.t('Python не вернул допустимую раскладку.', 'Python did not return a valid layout.'));
     var byId = {}, used = {}, usedZones = {}, usedComponents = {}, specs = [], r, i;
     for (i = 0; i < items.length; i++) byId[String(items[i].id)] = items[i];
     for (r = 0; r < answer.rows.length; r++) {
         var row = answer.rows[r], zi = row.zoneIndex;
         if (!numeric(zi) || zi != Math.floor(zi) || zi < 0 || zi >= zones.length ||
             !row.ids || !row.ids.length || row.ids.length > items.length || !numeric(row.top))
-            throw new Error('Некорректный ряд Python.');
+            throw new Error(str.t('Некорректный ряд Python.', 'Invalid row returned by Python.'));
         var zone = zones[zi], rowItems = [], width = 0, height = 0;
         for (i = 0; i < row.ids.length; i++) {
             var id = String(row.ids[i]), item = byId[id];
-            if (!item || used[id]) throw new Error('Python изменил состав выбранных слоёв.');
+            if (!item || used[id]) throw new Error(str.t('Python изменил состав выбранных слоёв.', 'Python changed the selected layer set.'));
             used[id] = true; rowItems.push(item); width += item.width; height = Math.max(height, item.height);
         }
         if (row.top < zone.top - 1e-6 || row.top + height * answer.commonScale > zone.bottom + 1e-6)
-            throw new Error('Ряд Python выходит за границу площадки.');
+            throw new Error(str.t('Ряд Python выходит за границу площадки.', 'A Python row extends outside its zone.'));
         usedZones[String(zi)] = true; usedComponents[String(zone.componentIndex)] = true;
         specs.push({ items: rowItems, contentWidth: width, rowHeight: height, top: row.top,
             interval: { left: zone.left, right: zone.right }, zoneIndex: zi, componentIndex: zone.componentIndex });
     }
-    for (i = 0; i < items.length; i++) if (!used[String(items[i].id)]) throw new Error('Python пропустил слой.');
+    for (i = 0; i < items.length; i++) if (!used[String(items[i].id)]) throw new Error(str.t('Python пропустил слой.', 'Python omitted a layer.'));
     var zoneCount = 0, componentCount = 0;
     for (var zk in usedZones) if (usedZones.hasOwnProperty(zk)) zoneCount++;
     for (var ck in usedComponents) if (usedComponents.hasOwnProperty(ck)) componentCount++;
     if (items.length >= geometry.componentCount && componentCount < geometry.componentCount)
-        throw new Error('Python пропустил отдельную область выделения.');
+        throw new Error(str.t('Python пропустил отдельную область выделения.', 'Python omitted a separate selection area.'));
     if (!cfg.autoRows && specs.length != Math.max(1, Math.min(cfg.rows, items.length)))
-        throw new Error('Python изменил заданное количество рядов.');
+        throw new Error(str.t('Python изменил заданное количество рядов.', 'Python changed the requested number of rows.'));
     var grouped = {};
     for (r = 0; r < specs.length; r++) {
         var sk = String(specs[r].zoneIndex);
@@ -4176,28 +4243,28 @@ function decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGa
         if (group.length > 1) hasAdjacent = true;
         for (i = 1; i < group.length; i++) {
             var actual = group[i].top - group[i - 1].top - group[i - 1].rowHeight * answer.commonScale;
-            if (Math.abs(actual - answer.gapY) > .001) throw new Error('Неравномерный интервал Python.');
+            if (Math.abs(actual - answer.gapY) > .001) throw new Error(str.t('Неравномерный интервал Python.', 'Python returned uneven gaps.'));
         }
     }
     if (hasAdjacent && (answer.gapY < minY - 1e-6 || answer.gapY > minY * cfg.maxGapMultiplier + 1e-6))
-        throw new Error('Python нарушил заданный интервал.');
+        throw new Error(str.t('Python нарушил заданный интервал.', 'Python violated the requested gap.'));
     var plan = finalizeLayoutRows(specs, answer.commonScale, baseGapX, baseGapY, answer.gapY, {
         shapedSelection: true, multiZoneSelection: true, zoneCount: geometry.zoneCount,
         usedZoneCount: zoneCount, usedComponentCount: componentCount, layoutHeight: geometry.bounds.height,
         solverPasses: numeric(answer.tested) ? answer.tested : 0 });
-    if (!plan) throw new Error('Python нарушил горизонтальную политику раскладки.');
+    if (!plan) throw new Error(str.t('Python нарушил горизонтальную политику раскладки.', 'Python violated the horizontal layout policy.'));
     var returned = {};
     for (i = 0; i < answer.placements.length; i++) {
         var p = answer.placements[i], key = String(p.id);
         if (returned[key] || !numeric(p.centerX) || !numeric(p.centerY) || !numeric(p.scale))
-            throw new Error('Некорректные координаты Python.');
+            throw new Error(str.t('Некорректные координаты Python.', 'Invalid coordinates returned by Python.'));
         returned[key] = p;
     }
     for (i = 0; i < plan.placements.length; i++) {
         var expected = plan.placements[i], actualP = returned[String(expected.layerId)];
         if (!actualP || Math.abs(expected.targetCenterX - actualP.centerX) > .001 ||
             Math.abs(expected.targetCenterY - actualP.centerY) > .001 || Math.abs(plan.commonScale - actualP.scale) > 1e-9)
-            throw new Error('Координаты Python не согласованы с размерами слоёв.');
+            throw new Error(str.t('Координаты Python не согласованы с размерами слоёв.', 'Python coordinates do not match the layer sizes.'));
     }
     plan.autoRows = cfg.autoRows;
     plan.pythonPacking = true;
@@ -4226,7 +4293,7 @@ function balanceZoneRows(specs, indices, zone, scale, baseGapX, baseGapY) {
         frontier.push(candidate);
     }
     for (r = 0; r < rows; r++) {
-        progress(currentProgressValue, 'Выравнивание наполнения рядов...');
+        progress(currentProgressValue, 'Balancing row fill...');
         var next = {};
         for (var consumedKey in states) if (states.hasOwnProperty(consumedKey)) {
             var consumed = Number(consumedKey), frontier = states[consumedKey], maximum = n - consumed - (rows - r - 1);
@@ -4291,7 +4358,7 @@ function buildMultiZoneLayoutFast(items, geometry, baseGapX, baseGapY) {
 
     for (var pass = 0; pass < iterations; pass++) {
         var scale = (low + high) / 2;
-        progress(32 + 22 * (pass / iterations), 'Проверено ' + pass + '/' + iterations + '; масштаб ' + round2(scale * 100) + '%');
+        progress(32 + 22 * (pass / iterations), 'Checked ' + pass + '/' + iterations + '; scale ' + round2(scale * 100) + '%');
 
         var allocation = findMultiZoneAllocation(items, zones, scale, baseGapX, baseGapY, cache,
             desiredRows, componentCount);
@@ -4355,7 +4422,7 @@ function buildMultiZoneLayoutFast(items, geometry, baseGapX, baseGapY) {
     var vertical = resolveVerticalLayout(rowSpecs, verticalGroups, commonScale, baseGapY);
     if (!vertical) return null;
 
-    progress(55, 'Выбор лучшего распределения по площадкам...');
+    progress(55, 'Choosing best zone allocation...');
 
     return finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, vertical.gapY, {
         scaleX: scaleX,
@@ -4627,7 +4694,7 @@ function buildShapedLayoutFast(items, geometry, baseGapX, baseGapY) {
 
     for (var pass = 0; pass < iterations; pass++) {
         var scale = (low + high) / 2;
-        progress(32 + 22 * (pass / iterations), 'Проверено ' + pass + '/' + iterations + '; масштаб ' + round2(scale * 100) + '%');
+        progress(32 + 22 * (pass / iterations), 'Checked ' + pass + '/' + iterations + '; scale ' + round2(scale * 100) + '%');
 
         var path = findShapedPlacementFast(items, geometry, scale, baseGapX, baseGapY, cache, desiredRows);
         if (path) {
@@ -4668,7 +4735,7 @@ function buildShapedLayoutFast(items, geometry, baseGapX, baseGapY) {
     }], commonScale, baseGapY);
     if (!vertical) return null;
 
-    progress(55, 'Выбор лучшей раскладки...');
+    progress(55, 'Choosing best layout...');
 
     return finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, vertical.gapY, {
         scaleX: scaleX,
@@ -5135,34 +5202,34 @@ function getMedianHeight(items) {
 
 function validateLayoutPlan(plan, geometry) {
     if (!plan || !plan.placements || !plan.placements.length)
-        throw new Error('План раскладки пуст.')
+        throw new Error(str.t('План раскладки пуст.', 'The layout plan is empty.'))
 
     if (plan.placements.length != sourceState.layerIds.length)
-        throw new Error('Количество рассчитанных позиций не совпадает с количеством выбранных слоёв.')
+        throw new Error(str.t('Количество рассчитанных позиций не совпадает с количеством выбранных слоёв.', 'The number of calculated positions does not match the number of selected layers.'))
 
     if (!isFinite(plan.commonScale) || plan.commonScale <= 0)
-        throw new Error('Некорректный общий масштаб.')
+        throw new Error(str.t('Некорректный общий масштаб.', 'Invalid common scale.'))
 
     var eps = 0.05, seenIds = {}, sourceIds = {};
     for (var si = 0; si < sourceState.layerIds.length; si++) sourceIds[String(sourceState.layerIds[si])] = true;
     for (var i = 0; i < plan.placements.length; i++) {
         var p = plan.placements[i], idKey = String(p.layerId);
         if (seenIds[idKey] || !sourceIds[idKey])
-            throw new Error('План содержит повторный или посторонний слой "' + p.name + '".');
+            throw new Error(str.t('План содержит повторный или посторонний слой "', 'The plan contains a duplicate or foreign layer "') + p.name + str.t('".', '".'));
         seenIds[idKey] = true;
         if (!isFinite(p.left) || !isFinite(p.top) || !isFinite(p.right) || !isFinite(p.bottom) ||
             p.right <= p.left || p.bottom <= p.top)
-            throw new Error('Некорректные границы слоя "' + p.name + '".');
+            throw new Error(str.t('Некорректные границы слоя "', 'Invalid bounds for layer "') + p.name + str.t('".', '".'));
 
         if (!isFinite(p.targetCenterX) || !isFinite(p.targetCenterY) || !isFinite(p.scale))
-            throw new Error('Некорректные координаты слоя "' + p.name + '".')
+            throw new Error(str.t('Некорректные координаты слоя "', 'Invalid coordinates for layer "') + p.name + str.t('".', '".'))
 
         if (Math.abs(p.scale - plan.commonScale) > 1e-10)
-            throw new Error('Нарушен единый масштаб раскладки.')
+            throw new Error(str.t('Нарушен единый масштаб раскладки.', 'The common layout scale was violated.'))
 
         if (p.left < geometry.bounds.left - eps || p.top < geometry.bounds.top - eps ||
             p.right > geometry.bounds.right + eps || p.bottom > geometry.bounds.bottom + eps)
-            throw new Error('Слой "' + p.name + '" выходит за внешние границы выделения.')
+            throw new Error(str.t('Слой "', 'Layer "') + p.name + str.t('" выходит за внешние границы выделения.', '" extends outside the outer selection bounds.'))
 
         if (!geometry.isRectangle) {
             var allowed = getIntervalsForVerticalSpan(geometry, p.top, p.bottom),
@@ -5173,14 +5240,14 @@ function validateLayoutPlan(plan, geometry) {
                     break;
                 }
             }
-            if (!inside) throw new Error('Слой "' + p.name + '" частично выходит за форму выделения.')
+            if (!inside) throw new Error(str.t('Слой "', 'Layer "') + p.name + str.t('" частично выходит за форму выделения.', '" extends partially outside the selection shape.'))
         }
     }
 
     for (i = 0; i < plan.placements.length; i++) {
         for (var j = i + 1; j < plan.placements.length; j++) {
             if (rectanglesOverlap(plan.placements[i], plan.placements[j], eps))
-                throw new Error('Обнаружено пересечение слоёв "' + plan.placements[i].name + '" и "' + plan.placements[j].name + '".')
+                throw new Error(str.t('Обнаружено пересечение слоёв "', 'Overlap detected between layers "') + plan.placements[i].name + str.t('" и "', '" and "') + plan.placements[j].name + str.t('".', '".'))
         }
     }
 }
@@ -5191,27 +5258,27 @@ function rectanglesOverlap(a, b, eps) {
 }
 
 function applyLayoutPlan() {
-    if (!layoutPlan || !layoutPlan.placements) throw new Error('Нет рассчитанного LayoutPlan.')
+    if (!layoutPlan || !layoutPlan.placements) throw new Error(str.t('Нет рассчитанного LayoutPlan.', 'No calculated LayoutPlan is available.'))
 
     var scale = layoutPlan.commonScale,
         ids = sourceState && sourceState.layerIds ? sourceState.layerIds.slice(0) : [],
         i;
 
-    if (!isFinite(scale) || scale <= 0) throw new Error('Некорректный общий масштаб.')
-    if (!ids.length) throw new Error('Не удалось получить исходный набор слоёв для общей трансформации.')
+    if (!isFinite(scale) || scale <= 0) throw new Error(str.t('Некорректный общий масштаб.', 'Invalid common scale.'))
+    if (!ids.length) throw new Error(str.t('Не удалось получить исходный набор слоёв для общей трансформации.', 'Could not get the source layer set for the common transform.'))
 
-    runLayoutProgressStage('Общий масштаб слоёв', function () {
+    runLayoutProgressStage('Scaling layers', function () {
         // For Transform only the selected set matters, not its palette-order
         // representation. Check targetLayersIDs directly: one document query,
         // no per-layer descriptors.
         if (!selectedLayerSetMatches(ids)) {
             lr.selectLayers(ids);
             if (!selectedLayerSetMatches(ids))
-                throw new Error('Photoshop не смог восстановить исходный набор слоёв перед общей трансформацией.');
+                throw new Error(str.t('Photoshop не смог восстановить исходный набор слоёв перед общей трансформацией.', 'Photoshop could not restore the source layer set before the common transform.'));
         }
         if (Math.abs(scale - 1) > 0.0000001) lr.transformSelection(scale * 100);
     });
-    runLayoutProgressStage('Позиционирование фотографий', function () {
+    runLayoutProgressStage('Positioning photos', function () {
         var total = layoutPlan.placements.length;
         for (i = 0; i < total; i++) {
             var p = layoutPlan.placements[i];
@@ -5219,21 +5286,21 @@ function applyLayoutPlan() {
             lr.selectLayers([p.layerId]);
             var boundsProperty = lr.getProperty('boundsNoEffects', p.layerId);
             if (!boundsProperty || !boundsProperty.value)
-                throw new Error('Не удалось получить boundsNoEffects слоя после общей трансформации.');
+                throw new Error(str.t('Не удалось получить boundsNoEffects слоя после общей трансформации.', 'Could not get layer boundsNoEffects after the common transform.'));
             var b = lr.descToObject(boundsProperty.value), actualLeft = Number(b.left), actualTop = Number(b.top),
                 dX = p.left - actualLeft, dY = p.top - actualTop;
             if (!isFinite(actualLeft) || !isFinite(actualTop) || !isFinite(dX) || !isFinite(dY))
-                throw new Error('Не удалось рассчитать итоговое положение слоя "' + p.name + '".');
+                throw new Error(str.t('Не удалось рассчитать итоговое положение слоя "', 'Could not calculate the final position of layer "') + p.name + str.t('".', '".'));
             if (Math.abs(dX) > 0.0001 || Math.abs(dY) > 0.0001) lr.move(dX, dY);
             layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
         }
     });
-    if (cfg.groupRows) runLayoutProgressStage('Группировка рядов', function () { groupLayoutRows(layoutPlan.rows); });
+    if (cfg.groupRows) runLayoutProgressStage('Grouping rows', function () { groupLayoutRows(layoutPlan.rows); });
 }
 
 function groupLayoutRows(rows, preparedMap) {
     for (var r = rows.length - 1; r >= 0; r--) {
-        layoutUnitProgress(rows.length - r - 1, rows.length, (rows.length - r - 1) + '/' + rows.length + ' — Ряд ' + (r + 1));
+        layoutUnitProgress(rows.length - r - 1, rows.length, (rows.length - r - 1) + '/' + rows.length + ' — Row ' + (r + 1));
 
         var ids = [], seen = {};
         for (var i = 0; i < rows[r].items.length; i++) {
@@ -5248,7 +5315,7 @@ function groupLayoutRows(rows, preparedMap) {
 
         lr.selectLayers(ids)
         lr.groupSelectedLayers()
-        layoutUnitProgress(rows.length - r, rows.length, (rows.length - r) + '/' + rows.length + ' — Ряд ' + (r + 1));
+        layoutUnitProgress(rows.length - r, rows.length, (rows.length - r) + '/' + rows.length + ' — Row ' + (r + 1));
     }
 }
 
@@ -5346,7 +5413,7 @@ function OptionalPythonFeatures(api, failureLimit) {
         if (!result || !result.ok) {
             state.disabled = true;
             state.reason = result && result.reason ? result.reason : 'python_unavailable';
-            state.message = result && result.message ? result.message : 'Python-функции недоступны.';
+            state.message = result && result.message ? result.message : str.t('Python-функции недоступны.', 'Python features are unavailable.');
             return false;
         }
 
@@ -5361,13 +5428,13 @@ function OptionalPythonFeatures(api, failureLimit) {
         state.consecutiveFailures++;
         state.totalFailures++;
         state.reason = reason || 'python_error';
-        state.message = message || 'Ошибка дополнительного Python-анализа.';
+        state.message = message || str.t('Ошибка дополнительного Python-анализа.', 'Optional Python analysis error.');
 
         if (state.consecutiveFailures >= state.failureLimit) {
             state.disabled = true;
             state.reason = 'circuit_breaker';
-            state.message = 'Python-анализ отключён до конца запуска после ' + state.failureLimit +
-                ' последовательных ошибок. Последняя: ' + state.message;
+            state.message = str.t('Python-анализ отключён до конца запуска после ', 'Python analysis was disabled for the rest of this run after ') + state.failureLimit +
+                str.t(' последовательных ошибок. Последняя: ', ' consecutive errors. Last error: ') + state.message;
         }
     };
 
@@ -5427,7 +5494,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
 
     function runtimeFiles() {
         var local = $.getenv('LOCALAPPDATA');
-        if (!local) throw new Error('LOCALAPPDATA недоступен.');
+        if (!local) throw new Error(str.t('LOCALAPPDATA недоступен.', 'LOCALAPPDATA is unavailable.'));
         var root = local + '/JazzyScripts/AutoLayoutRuntime';
         return {
             root: root,
@@ -5524,8 +5591,8 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     function stopIncompatibleServer(result) {
         if (!isAutoLayoutServer(result)) return false;
 
-        if (layoutProgressRun && layoutProgressRun.active) { layoutProgressRun.detail = 'Закрытие предыдущей версии Python'; pulseLayoutProgress(true); }
-        else app.changeProgressText('Закрытие предыдущей версии Python...');
+        if (layoutProgressRun && layoutProgressRun.active) { layoutProgressRun.detail = 'Closing previous Python version'; pulseLayoutProgress(true); }
+        else app.changeProgressText('Closing previous Python version...');
 
         // Newer servers stop cooperatively. The forced fallback exists only so
         // this version can also replace the already released v0.7.0 server.
@@ -5537,8 +5604,8 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     function localAvailability() {
         try {
             var module = findPythonModule(apiFile);
-            if (!module) return { available: false, reason: 'module_missing', message: 'модуль ' + apiFile + '.pyw не найден' };
-            if (!ready()) return { available: false, reason: 'runtime_missing', message: 'runtime не установлен или модели отсутствуют; запустите install_runtime.bat' };
+            if (!module) return { available: false, reason: 'module_missing', message: str.t('модуль ', 'module ') + apiFile + str.t('.pyw не найден', '.pyw was not found') };
+            if (!ready()) return { available: false, reason: 'runtime_missing', message: str.t('runtime не установлен или модели отсутствуют; запустите install_runtime.bat', 'runtime is not installed or models are missing; run install_runtime.bat') };
             return { available: true, reason: '', message: '' };
         } catch (e) {
             return { available: false, reason: 'runtime_unavailable', message: e && e.message ? e.message : String(e) };
@@ -5549,18 +5616,18 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
         if (!baseAvailability.available) return baseAvailability;
         var r = runtimeFiles();
         if (!(new File(r.root + '/venv/models/face_landmarker.task')).exists)
-            return { available: false, message: 'Для поворота головы обновите runtime через install_runtime.bat.' };
+            return { available: false, message: str.t('Для поворота головы обновите runtime через install_runtime.bat.', 'Update the runtime with install_runtime.bat to enable head-turn analysis.') };
         try {
             if (!r.marker.open('r')) throw new Error('Runtime marker unavailable');
             var revision = Number(r.marker.read());
             r.marker.close();
-            if (!(revision >= 2)) return { available: false, message: 'Для поворота головы обновите runtime через install_runtime.bat.' };
+            if (!(revision >= 2)) return { available: false, message: str.t('Для поворота головы обновите runtime через install_runtime.bat.', 'Update the runtime with install_runtime.bat to enable head-turn analysis.') };
         } catch (e) {
             try { r.marker.close(); } catch (ignored) { }
-            return { available: false, message: 'Для поворота головы обновите runtime через install_runtime.bat.' };
+            return { available: false, message: str.t('Для поворота головы обновите runtime через install_runtime.bat.', 'Update the runtime with install_runtime.bat to enable head-turn analysis.') };
         }
         if (!(new File(r.root + '/venv/models/pose_landmarker_full.task')).exists)
-            return { available: true, message: 'Пока учитывается только голова. Для корпуса обновите runtime через install_runtime.bat.' };
+            return { available: true, message: str.t('Пока учитывается только голова. Для корпуса обновите runtime через install_runtime.bat.', 'Only the head is currently considered. Update the runtime with install_runtime.bat to enable body orientation.') };
         return { available: true, message: '' };
     };
 
@@ -5572,7 +5639,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             var result = sendMessage({ type: 'handshake', message: '' }, 300);
             if (isHandshake(result)) return { available: true, reason: '', message: '' };
             if (result && !isAutoLayoutServer(result))
-                return { available: false, reason: 'port_busy', message: 'порт Python занят другим приложением' };
+                return { available: false, reason: 'port_busy', message: str.t('порт Python занят другим приложением', 'the Python port is in use by another application') };
         } catch (e) { }
         return localAvailability();
     };
@@ -5585,11 +5652,11 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             var local = localAvailability();
             if (result) {
                 if (!isAutoLayoutServer(result))
-                    return { ok: false, reason: 'port_busy', message: 'Порт Auto layout занят другим приложением или неизвестным сервером.' };
+                    return { ok: false, reason: 'port_busy', message: str.t('Порт Auto layout занят другим приложением или неизвестным сервером.', 'The Auto Layout port is in use by another application or an unknown server.') };
                 if (!local.available)
                     return { ok: false, reason: local.reason, message: local.message };
                 if (!stopIncompatibleServer(result))
-                    return { ok: false, reason: 'old_server_stop_failed', message: 'Не удалось автоматически закрыть Python-сервер предыдущей версии Auto layout.' };
+                    return { ok: false, reason: 'old_server_stop_failed', message: str.t('Не удалось автоматически закрыть Python-сервер предыдущей версии Auto layout.', 'Could not automatically stop the Python server from the previous Auto Layout version.') };
             }
 
             if (!local.available)
@@ -5599,19 +5666,19 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
                 r = runtimeFiles();
             $.setenv('AUTO_LAYOUT_SERVER', module.fsName);
             if (!r.launcher.execute())
-                return { ok: false, reason: 'launcher_failed', message: 'Не удалось запустить приватный Python launcher.' };
+                return { ok: false, reason: 'launcher_failed', message: str.t('Не удалось запустить приватный Python launcher.', 'Could not start the private Python launcher.') };
 
             var start = (new Date()).getTime();
-            if (layoutProgressRun && layoutProgressRun.active) { layoutProgressRun.detail = 'Запуск модуля Python'; pulseLayoutProgress(true); }
-            else app.changeProgressText('Запуск модуля Python...');
+            if (layoutProgressRun && layoutProgressRun.active) { layoutProgressRun.detail = 'Starting Python module'; pulseLayoutProgress(true); }
+            else app.changeProgressText('Starting Python module...');
             while ((new Date()).getTime() - start < INIT_DELAY) {
                 result = sendMessage({ type: 'handshake', message: '' }, 1000);
                 if (isHandshake(result)) return { ok: true };
                 if (result)
-                    return { ok: false, reason: 'unexpected_server', message: 'Неожиданный ответ Python-сервера Auto layout.' };
+                    return { ok: false, reason: 'unexpected_server', message: str.t('Неожиданный ответ Python-сервера Auto layout.', 'Unexpected response from the Auto Layout Python server.') };
                 $.sleep(150);
             }
-            return { ok: false, reason: 'startup_timeout', message: 'Не удалось запустить Python-сервер Auto layout. Подробности: ' + r.root + '/server.log' };
+            return { ok: false, reason: 'startup_timeout', message: str.t('Не удалось запустить Python-сервер Auto layout. Подробности: ', 'Could not start the Auto Layout Python server. Details: ') + r.root + '/server.log' };
         } catch (e) {
             if (e.number && e.number == 8007) throw e;
             return { ok: false, reason: 'startup_error', message: e && e.message ? e.message : String(e) };
@@ -5637,8 +5704,8 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
         if (options.longRequest === true) beginPythonProgressWait();
         try {
             var result = sendMessage({ type: type, message: payload, long_request: options.longRequest === true }, ANALYSIS_DELAY);
-            if (!result) throw new Error('Превышено время ожидания ответа Python.');
-            if (result.server_id != serverID) throw new Error('Ответ получен от несовместимого Python-сервера.');
+            if (!result) throw new Error(str.t('Превышено время ожидания ответа Python.', 'Python response timeout.'));
+            if (result.server_id != serverID) throw new Error(str.t('Ответ получен от несовместимого Python-сервера.', 'Response received from an incompatible Python server.'));
             if (result.type == 'cancelled') throwCancelled();
             if (result.type == 'error') throw new Error(String(result.message));
             return result.type == 'answer' ? result.message : null;
@@ -5665,7 +5732,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             longRequest = o.long_request === true,
             sent = false,
             received = false;
-        if (!listener.listen(portListen, 'UTF-8')) throw new Error('Порт ответа ' + portListen + ' занят.');
+        if (!listener.listen(portListen, 'UTF-8')) throw new Error(str.t('Порт ответа ', 'Response port ') + portListen + str.t(' занят.', ' is busy.'));
         try {
             sender.timeout = 1;
             if (!sender.open(apiHost + ':' + portSend, 'UTF-8')) return null;
