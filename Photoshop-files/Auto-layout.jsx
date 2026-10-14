@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.19 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.23 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -43,7 +43,7 @@
 
 $.localize = true;
 
-var ver = '0.10.19',
+var ver = '0.10.23',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -135,9 +135,10 @@ function main() {
         historyState = activeDocument.activeHistoryState;
         sourceState = collectDocumentState();
         inputPreparation = buildInputPreparation(sourceState.layerIds);
-        var semanticRequested = !!(cfg.alternateGender || cfg.considerHeadTurn || (cfg.colorMode && cfg.colorMode != 'off')),
-            items, analysis = null, useGender = false, useHead = false;
-        layoutProgressRun = { index: 0, total: 7 + (inputPreparation ? 2 : 0) + (cfg.groupRows ? 1 : 0) + (semanticRequested ? 2 : 0), active: false };
+        var alphabetical = alphabetOrderActive(),
+            semanticRequested = !alphabetical && !!(cfg.alternateGender || cfg.considerHeadTurn || (cfg.colorMode && cfg.colorMode != 'off')),
+            items, originalItems, analysis = null, useGender = false, useHead = false;
+        layoutProgressRun = { index: 0, total: 7 + (inputPreparation ? 2 : 0) + (cfg.groupRows ? 1 : 0) + (semanticRequested ? 2 : 0) + (alphabetical ? 1 : 0), active: false };
         runLayoutProgressStage('Preparation and selection', function () {
             historyState = activeDocument.activeHistoryState;
             layoutUnitProgress(1, 2, 'Selected layers read');
@@ -152,6 +153,11 @@ function main() {
         items = runLayoutProgressStage('Reading layer sizes', function () {
             return collectLayoutItems(sourceState.layerIds);
         }, 8, 30);
+        originalItems = items; // Keep proxy-to-root correspondence before page sorting.
+        if (alphabetical) runLayoutProgressStage('Reading alphabetical names', function () {
+            prepareAlphabeticalKeys(items);
+            if (cfg.alphabetOrder == 'page') items = sortAlphabeticalItems(items);
+        });
         genderSummary = null; headTurnSummary = null;
         if (semanticRequested) runLayoutProgressStage('Analyzing photos', function () {
             analysis = analyzeSemantics(items);
@@ -166,6 +172,8 @@ function main() {
         layoutPlan = runLayoutProgressStage('Calculating selection packing', function () {
             return useGender ? buildGenderAwareLayoutPlan(items, selectionGeometry) : buildLayoutPlan(items, selectionGeometry);
         }, 32, 55);
+        if (alphabetical && cfg.alphabetOrder == 'zone')
+            layoutPlan = sortAlphabeticalZones(layoutPlan, selectionGeometry);
         layoutPlan.genderSummary = genderSummary;
         if (semanticRequested) runLayoutProgressStage('Semantic ordering', function () {
             var useColor = !!(analysis.color && !analysis.color.fallbackToGeometry),
@@ -183,9 +191,7 @@ function main() {
             }
             layoutPlan.colorSummary = analysis.color;
         });
-        // A fixed Action captures the FINAL successful scale/Y geometry after semantic
-        // ordering. Left/Center/Right also lock one common X gap; Justify deliberately
-        // recalculates X per current row on every playback.
+        // Capture fixed metrics only after final semantic/alphabetical ordering.
         if (cfg.lockForAction && !lockedLayoutActive()) {
             actionLayoutProfile = profileFromLayout(layoutPlan);
             layoutPlan = freezeLayoutMetrics(layoutPlan, selectionGeometry);
@@ -198,7 +204,7 @@ function main() {
         });
         // All modifying stages retain the single original History/rollback boundary.
         if (inputPreparation) {
-            preparedAnalysisItems = items;
+            preparedAnalysisItems = originalItems;
             activeDocument.activeHistoryState = historyState;
             activeDocument.suspendHistory('Auto layout', 'commitPreparedLayout();');
         } else activeDocument.suspendHistory('Auto layout', 'applyLayoutPlan()');
@@ -525,6 +531,7 @@ function dialog(editingAction) {
         stGapHint = pnGaps.add("statictext{properties:{multiline:true},preferredSize:[303,68]}"),
 
         pnAdditional = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:10,margins:[10,20,10,10]}"),
+        dlAlphabet = pnAdditional.add('dropdownlist'),
         chPythonPacking = pnAdditional.add('checkbox'),
         chAlternateGender = pnAdditional.add('checkbox'),
         chHeadTurn = pnAdditional.add('checkbox'),
@@ -549,7 +556,7 @@ function dialog(editingAction) {
     stGapXValue.alignment = stGapYValue.alignment = stGapMaxValue.alignment = ['right', 'center'];
     slGapX.alignment = slGapY.alignment = slGapMax.alignment = ['fill', 'center'];
     stGapHint.alignment = stPythonStatus.alignment = ['fill', 'top'];
-    dlColor.alignment = ['fill', 'center'];
+    dlColor.alignment = dlAlphabet.alignment = ['fill', 'center'];
 
     dlg.text = 'Auto layout ' + ver
     pnLayout.text = str.layoutPanel
@@ -575,6 +582,10 @@ function dialog(editingAction) {
     stGapYTitle.text = str.gapY
     stGapMaxTitle.text = str.maxGap
     stGapHint.text = str.gapHint
+    dlAlphabet.add('item', str.alphabetOff);
+    dlAlphabet.add('item', str.alphabetPage);
+    dlAlphabet.add('item', str.alphabetZone);
+    dlAlphabet.helpTip = str.alphabetTip;
     chPythonPacking.text = str.pythonPacking;
     chPythonPacking.helpTip = str.pythonPackingTip;
     chAlternateGender.text = str.alternateGender
@@ -627,6 +638,22 @@ function dialog(editingAction) {
         cfg.alternateGender = false
     }
     chGroupRows.value = cfg.groupRows
+    dlAlphabet.selection = dlAlphabet.items[cfg.alphabetOrder == 'page' ? 1 : cfg.alphabetOrder == 'zone' ? 2 : 0];
+    dlAlphabet.enabled = true; // Always allow disabling a saved mode if Python is unavailable.
+    dlAlphabet.onChange = function () { readAlphabetSelection(); updateAdditionalEnabled(); };
+    updateAdditionalEnabled();
+
+    function readAlphabetSelection() {
+        var text = dlAlphabet.selection ? String(dlAlphabet.selection.text) : '';
+        cfg.alphabetOrder = text == str.alphabetPage ? 'page' : text == str.alphabetZone ? 'zone' : 'off';
+    }
+    function updateAdditionalEnabled() {
+        var normal = !alphabetOrderActive();
+        chPythonPacking.enabled = normal;
+        chAlternateGender.enabled = normal && pythonAvailability.available;
+        chHeadTurn.enabled = normal && headAvailability.available;
+        dlColor.enabled = stColor.enabled = normal && pythonAvailability.available;
+    }
 
     updateGapLabels()
     updateGapHint()
@@ -690,6 +717,7 @@ function dialog(editingAction) {
     chGroupRows.onClick = function () { cfg.groupRows = this.value }
 
     ok.onClick = function () {
+        readAlphabetSelection();
         // Read the selected item explicitly, even if ScriptUI skipped onChange.
         if (dlColor.selection) cfg.colorMode = colorModeFromSelection(dlColor.selection);
         if (editingAction && cfg.lockForAction && !actionLayoutProfile) {
@@ -817,6 +845,11 @@ function Locale() {
     this.justifyGapHint = this.t(
         'По ширине: горизонтальный интервал растягивается до границ выделения и не ограничивается максимальным множителем. Минимальный Gap X сохраняется; по Y действует обычный лимит.',
         'Justify: the horizontal gap stretches to the selection edges and is not limited by the maximum multiplier. Minimum Gap X is preserved; the normal limit still applies to Y.');
+    this.alphabetOff = this.t('Без сортировки по алфавиту', 'No alphabetical ordering');
+    this.alphabetPage = this.t('По алфавиту в пределах страницы', 'Alphabetical across the page');
+    this.alphabetZone = this.t('По алфавиту в пределах зоны', 'Alphabetical within each zone');
+    this.alphabetTip = this.t('Фамилия и имя из названия слоя; номера и служебные приписки пропускаются. Нужен Python для разбора имён. Остальные дополнительные опции игнорируются.',
+        'Surname and given name from the layer name; numbers and service labels are skipped. Python is required to parse names. Other additional options are ignored.');
     this.pythonPacking = this.t('рассчитывать заполнение площадок в Python', 'calculate zone packing in Python');
     this.pythonPackingTip = this.t(
         'Более широкий поиск для составного выделения. При недоступности сервера расчёт выполняет JSX.',
@@ -858,6 +891,7 @@ function Config() {
     this.gapX = 6
     this.gapY = 6
     this.maxGapMultiplier = 3
+    this.alphabetOrder = 'off'
     this.alternateGender = false
     this.considerHeadTurn = false
     this.colorMode = 'off'
@@ -871,6 +905,7 @@ function Config() {
             descriptorToObject(settingsObj, d)
         } catch (e) { }
 
+        this.alphabetOrder = normalizeAlphabetOrder(this.alphabetOrder);
         this.colorMode = normalizeColorMode(this.colorMode);
         this.rows = Math.max(1, Math.round(Number(this.rows) || 1))
         if (this.rowRhythm != 'auto' && this.rowRhythm != 'centerWide' && this.rowRhythm != 'edgesWide' &&
@@ -882,6 +917,7 @@ function Config() {
     }
 
     this.putScriptSettings = function (toAction) {
+        settingsObj.alphabetOrder = normalizeAlphabetOrder(settingsObj.alphabetOrder);
         settingsObj.colorMode = normalizeColorMode(settingsObj.colorMode);
         var d = objectToDescriptor(settingsObj);
         if (toAction) {
@@ -916,7 +952,7 @@ function Config() {
 
     function objectToDescriptor(o) {
         var d = new ActionDescriptor,
-            properties = ['autoRows', 'rows', 'rowRhythm', 'horizontalAlign', 'gapX', 'gapY', 'maxGapMultiplier', 'alternateGender', 'considerHeadTurn', 'colorMode', 'pythonPacking', 'lockForAction', 'groupRows'];
+            properties = ['autoRows', 'rows', 'rowRhythm', 'horizontalAlign', 'gapX', 'gapY', 'maxGapMultiplier', 'alphabetOrder', 'alternateGender', 'considerHeadTurn', 'colorMode', 'pythonPacking', 'lockForAction', 'groupRows'];
 
         for (var i = 0; i < properties.length; i++) {
             var key = properties[i],
@@ -2188,6 +2224,73 @@ function collectLayoutItems(ids) {
     return output;
 }
 
+
+function normalizeAlphabetOrder(value) {
+    var v = String(value || 'off');
+    return v == 'page' || v == 'zone' ? v : 'off';
+}
+
+function alphabetOrderActive() { return normalizeAlphabetOrder(cfg.alphabetOrder) != 'off'; }
+
+function prepareAlphabeticalKeys(items) {
+    pythonFeatures.resetForRun();
+    if (!pythonFeatures.ensureReady()) throw new Error(str.t('Для сортировки имён нужен Python: ', 'Python is required for name ordering: ') + pythonFeatures.getState().message);
+    var payload = [], expected = {}, i;
+    for (i = 0; i < items.length; i++) { payload.push({ id: items[i].id, name: items[i].name }); expected[String(items[i].id)] = items[i]; }
+    beginPythonProgressWait(1, 1500);
+    var call;
+    try { call = pythonFeatures.call('alphabet_names', payload, { photo: false }); }
+    finally { endPythonProgressWait(); }
+    if (!call.ok || !(call.value instanceof Array) || call.value.length != items.length)
+        throw new Error(str.t('Не удалось разобрать имена для алфавитной сортировки.', 'Could not parse names for alphabetical ordering.'));
+    var seen = {};
+    for (i = 0; i < call.value.length; i++) {
+        var row = call.value[i], key = row ? String(row.id) : '', item = expected[key];
+        if (!item || seen[key] || typeof row.id != 'number' || typeof row.key != 'string' || row.key.length > 1024 || typeof row.named != 'boolean' || (row.named && !row.key))
+            throw new Error(str.t('Некорректный ответ сортировки имён.', 'Invalid name-ordering response.'));
+        seen[key] = true; item.alphabetKey = row.key; item.alphabetNamed = row.named;
+    }
+    layoutUnitProgress(1, 1, 'Names parsed');
+}
+
+function sortAlphabeticalItems(items) {
+    return items.slice(0).sort(function (a, b) {
+        if (a.alphabetNamed != b.alphabetNamed) return a.alphabetNamed ? -1 : 1;
+        if (a.alphabetKey < b.alphabetKey) return -1;
+        if (a.alphabetKey > b.alphabetKey) return 1;
+        return a.order - b.order; // Stable ties, independent of engine sort stability.
+    });
+}
+
+function sortAlphabeticalZones(plan, geometry) {
+    var groups = {}, rows = [], r, i;
+    for (r = 0; r < plan.rows.length; r++) {
+        var key = String(plan.rows[r].zoneIndex == undefined ? 0 : plan.rows[r].zoneIndex);
+        if (!groups[key]) groups[key] = { items: [], offset: 0 };
+        groups[key].items = groups[key].items.concat(plan.rows[r].items);
+    }
+    for (key in groups) if (groups.hasOwnProperty(key)) groups[key].items = sortAlphabeticalItems(groups[key].items);
+    for (r = 0; r < plan.rows.length; r++) {
+        key = String(plan.rows[r].zoneIndex == undefined ? 0 : plan.rows[r].zoneIndex);
+        var group = groups[key], count = plan.rows[r].items.length;
+        rows.push(group.items.slice(group.offset, group.offset + count)); group.offset += count;
+    }
+    var candidate = rebuildAssignedLayout(plan, geometry, rows, true);
+    if (!candidate && !plan.lockedMetrics) {
+        // Different widths can require a slightly smaller common scale. Keep zone
+        // membership and row counts instead of silently breaking alphabetical order.
+        var low = 0, high = plan.commonScale, seed = {}, k;
+        for (k in plan) if (plan.hasOwnProperty(k)) seed[k] = plan[k];
+        for (i = 0; i < 28; i++) {
+            seed.commonScale = (low + high) / 2;
+            var trial = rebuildAssignedLayout(seed, geometry, rows, true);
+            if (trial) { candidate = trial; low = seed.commonScale; } else high = seed.commonScale;
+        }
+    }
+    if (!candidate) throw new Error(str.t('Не удалось разместить алфавитный порядок с заданными размерами и интервалами.', 'Could not fit alphabetical order using the specified sizes and gaps.'));
+    validateLayoutPlan(candidate, geometry);
+    return candidate;
+}
 
 function analyzeSemantics(items) {
     pythonFeatures.resetForRun();
@@ -3758,7 +3861,7 @@ function buildLayoutPlan(items, geometry) {
         var multi = buildMultiZoneLayoutFast(items, geometry, baseGapX, baseGapY);
         if (!multi) throw new Error(str.t('Не удалось распределить слои по отдельным площадкам выделения.', 'Could not distribute layers across the separate selection zones.'))
         multi.autoRows = cfg.autoRows
-        if (cfg.pythonPacking) multi.packingFallbackReason = packingFallbackReason;
+        if (cfg.pythonPacking && !alphabetOrderActive()) multi.packingFallbackReason = packingFallbackReason;
         return multi
     }
 
@@ -4237,7 +4340,7 @@ function markComponentSignature(signature, index) {
 }
 
 function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY) {
-    if (!cfg.pythonPacking || packingDisabledForRun) return null;
+    if (alphabetOrderActive() || !cfg.pythonPacking || packingDisabledForRun) return null;
     var init = pythonApi.tryInit();
     if (!init || !init.ok) {
         packingDisabledForRun = true;
@@ -4263,7 +4366,7 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY) {
         packingDisabledForRun = true;
         packingFallbackReason = e.message ? e.message : String(e);
         return null;
-    }
+    } finally { endPythonProgressWait(); }
 }
 
 function decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGapY) {
@@ -5559,7 +5662,7 @@ function OptionalPythonFeatures(api, failureLimit) {
         }
 
         try {
-            var value = api.sendPayload(type, payload, { longRequest: !!options.photo || type == 'gender_names' }),
+            var value = api.sendPayload(type, payload, { longRequest: !!options.photo || (type == 'gender_names' || type == 'alphabet_names') }),
                 outcome = options.classify ? options.classify(value) : { failure: false };
 
             if (outcome && outcome.failure) {
@@ -5589,6 +5692,74 @@ function OptionalPythonFeatures(api, failureLimit) {
     };
 }
 
+
+// ExtendScript has no guaranteed native JSON.parse. Parse data without executing
+// server text; reject truncated replies, expressions and non-finite numbers.
+function parsePythonJSON(text) {
+    var input = String(text), pos = 0, size = input.length;
+    function fail() { throw new Error('Invalid Python JSON response'); }
+    function space() { while (pos < size && /[\x20\t\r\n]/.test(input.charAt(pos))) pos++; }
+    function stringValue() {
+        var result = '', ch, escaped, hex,
+            escapes = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
+        pos++;
+        while (pos < size) {
+            ch = input.charAt(pos++);
+            if (ch == '"') return result;
+            if (ch.charCodeAt(0) < 32) fail();
+            if (ch != '\\') { result += ch; continue; }
+            escaped = input.charAt(pos++);
+            if (escaped == 'u') {
+                hex = input.substr(pos, 4);
+                if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail();
+                result += String.fromCharCode(parseInt(hex, 16)); pos += 4;
+            } else {
+                if (!escapes.hasOwnProperty(escaped)) fail();
+                result += escapes[escaped];
+            }
+        }
+        fail();
+    }
+    function value(depth) {
+        if (depth > 64) fail();
+        space();
+        var ch = input.charAt(pos), result, key, match, number;
+        if (ch == '"') return stringValue();
+        if (ch == '[' || ch == '{') {
+            var array = ch == '[', close = array ? ']' : '}';
+            result = array ? [] : {}; pos++; space();
+            if (input.charAt(pos) == close) { pos++; return result; }
+            while (pos < size) {
+                space();
+                if (array) result.push(value(depth + 1));
+                else {
+                    if (input.charAt(pos) != '"') fail();
+                    key = stringValue(); space();
+                    // Protocol objects never need prototype or method keys.
+                    if (key == '__proto__' || key == 'constructor' || key == 'prototype' || key == 'hasOwnProperty') fail();
+                    if (result.hasOwnProperty(key) || input.charAt(pos++) != ':') fail();
+                    result[key] = value(depth + 1);
+                }
+                space(); ch = input.charAt(pos++);
+                if (ch == close) return result;
+                if (ch != ',') fail();
+            }
+            fail();
+        }
+        if (input.substr(pos, 4) == 'true') { pos += 4; return true; }
+        if (input.substr(pos, 5) == 'false') { pos += 5; return false; }
+        if (input.substr(pos, 4) == 'null') { pos += 4; return null; }
+        match = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/.exec(input.slice(pos));
+        if (!match) fail();
+        pos += match[0].length; number = Number(match[0]);
+        if (!isFinite(number)) fail();
+        return number;
+    }
+    var result = value(0);
+    space();
+    if (pos != size) fail();
+    return result;
+}
 
 function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     var sequence = 0,
@@ -5652,8 +5823,8 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
         return !serverIsListening();
     }
 
-    function forceStopLegacyServer() {
-        // v0.7.0 predates the graceful shutdown command. Only call this after a
+    function forceStopConfirmedServer() {
+        // A previous server may not stop cooperatively. Only call this after a
         // successful handshake has proved that the listener is an Auto Layout
         // server. The helper kills the process owning our dedicated TCP port.
         var token = (new Date()).getTime() + '_' + Math.floor(Math.random() * 1000000),
@@ -5682,6 +5853,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             if (!vbs.execute()) return false;
             return waitServerStop(5000);
         } catch (e) {
+            if (e.number == 8007) throw e;
             return false;
         } finally {
             try { if (bat.opened) bat.close(); } catch (e1) { }
@@ -5697,11 +5869,10 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
         if (layoutProgressRun && layoutProgressRun.active) { layoutProgressRun.detail = 'Closing previous Python version'; pulseLayoutProgress(true); }
         else app.changeProgressText('Closing previous Python version...');
 
-        // Newer servers stop cooperatively. The forced fallback exists only so
-        // this version can also replace the already released v0.7.0 server.
+        // Try cooperative shutdown first, then replace the confirmed old server.
         controlRequest('shutdown', '', true);
         if (waitServerStop(2500)) return true;
-        return forceStopLegacyServer();
+        return forceStopConfirmedServer();
     }
 
     function localAvailability() {
@@ -5822,7 +5993,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             if (!socket.open(apiHost + ':' + portSend, 'UTF-8')) return false;
             socket.writeln(objectToJSON({ type: type, target_id: targetID }));
             if (!waitReply) return true;
-            var result = eval('(' + socket.readln() + ')');
+            var result = parsePythonJSON(socket.readln());
             return result && result.stopped === true;
         } catch (e) { return false; }
         finally { try { socket.close(); } catch (e2) { } }
@@ -5860,7 +6031,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
                 var answer = listener.poll();
                 if (answer) {
                     var parsed = null;
-                    try { answer.timeout = 5; parsed = eval('(' + answer.readln() + ')'); }
+                    try { answer.timeout = 5; parsed = parsePythonJSON(answer.readln()); }
                     catch (parseError) { }
                     finally { answer.close(); }
                     if (parsed && parsed.request_id == o.request_id) {
@@ -5884,11 +6055,17 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     function objectToJSON(o) {
         function quote(value) {
             return '"' + String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-                .replace(/\r/g, '\\r').replace(/\n/g, '\\n').replace(/\t/g, '\\t') + '"';
+                .replace(/[\x00-\x1f\u2028\u2029]/g, function (ch) {
+                    return '\\u' + ('0000' + ch.charCodeAt(0).toString(16)).slice(-4);
+                }) + '"';
         }
         if (o === null || o === undefined) return 'null';
         if (typeof o == 'string') return quote(o);
-        if (typeof o == 'number' || typeof o == 'boolean') return String(o);
+        if (typeof o == 'number') {
+            if (!isFinite(o)) throw new Error('Non-finite JSON number');
+            return String(o);
+        }
+        if (typeof o == 'boolean') return String(o);
         var parts = [], i, key;
         if (o instanceof Array) {
             for (i = 0; i < o.length; i++) parts.push(objectToJSON(o[i]));

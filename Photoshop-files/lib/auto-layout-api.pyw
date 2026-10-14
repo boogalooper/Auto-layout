@@ -80,7 +80,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.19"
+SERVER_ID = "auto-layout/0.10.23"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 
@@ -180,6 +180,70 @@ def russian_name_record(dataset, token):
         if result is None and "ё" in text.casefold():
             result = store.find_one(dataset, text.replace("ё", "е").replace("Ё", "Е"))
         return result
+
+
+ALPHABET_WORD_RE = re.compile(r"[A-Za-zА-Яа-яЁё]+(?:[-‐‑][A-Za-zА-Яа-яЁё]+)*")
+ALPHABET_SERVICE_WORDS = frozenset("слой группа копия копировать дубль вариант фото фотография портрет кадр рамка фон новый новая обработка обработано учитель учительница ученик ученица мальчик девочка layer group copy duplicate version photo image img dsc dscn background edited final psd jpg jpeg png tif tiff raw cr crw nef arw".split())
+
+
+@lru_cache(maxsize=4096)
+def alphabetical_token_roles(token):
+    """Identity roles only; original spelling is used for the final key."""
+    name = russian_name_record("names", token)
+    surname = russian_name_record("surnames", token)
+    middle = russian_name_record("midnames", token)
+    nf = float(name.get('count', 0)) if name else 0.0
+    sf = float(surname.get('count', 0)) if surname else 0.0
+    mf = float(middle.get('count', 0)) if middle else 0.0
+    # Rare surname-as-name records (e.g. Иванов) must not reverse the identity.
+    given_score = 100.0 if name and nf >= max(sf, mf) else 0.0
+    surname_score = 100.0 if surname and sf >= max(nf, mf) else 0.0
+    if not name:
+        candidate = parse_candidate(token, "Name")
+        if candidate and candidate["score"] >= .1:
+            given_score = candidate["score"] * 10
+    if not surname:
+        candidate = parse_candidate(token, "Surn")
+        if candidate and candidate["nominative"] and candidate["score"] >= .1:
+            surname_score = candidate["score"] * 10
+    return given_score, surname_score, bool(middle)
+
+
+def alphabetical_name_key(layer_name):
+    # Discard embedded asset IDs, e.g. IMG_0023/DSC1234, and numeric indices.
+    text = re.sub(r"[A-Za-z]+[_-]?\d+", " ", str(layer_name or ""))
+    tokens = [word for word in ALPHABET_WORD_RE.findall(text)
+              if word.casefold() not in ALPHABET_SERVICE_WORDS][:64]
+    if not tokens:
+        return dict(key="", named=False, identity="", method="empty")
+    roles = [alphabetical_token_roles(token) if re.search(r"[А-Яа-яЁё]", token) else (0, 0, False)
+             for token in tokens]
+    pairs = []
+    for ni, (ns, _, _) in enumerate(roles):
+        if ns <= 0:
+            continue
+        for si, (_, ss, middle) in enumerate(roles):
+            if ni == si or ss <= 0 or abs(ni - si) > 2:
+                continue
+            pairs.append((ns + ss - abs(ni - si), -min(ni, si), si, ni))
+    if pairs:
+        _, _, si, ni = max(pairs)
+        identity = " ".join(tokens[i] for i in sorted((si, ni)))
+        method = "written_pair"
+    else:
+        names = [(score, -i, i) for i, (score, _, _) in enumerate(roles) if score > 0]
+        if names:
+            _, _, ni = max(names)
+            # A rare surname can be absent from both dictionaries. Prefer the
+            # adjacent non-patronymic word, conventionally preceding the name.
+            adjacent = [i for i in (ni - 1, ni + 1) if 0 <= i < len(tokens) and not roles[i][2]]
+            identity = " ".join(tokens[i] for i in sorted((adjacent[0], ni))) if adjacent else tokens[ni]
+            method = "given_adjacent"
+        else:
+            identity = " ".join(tokens[:2])
+            method = "cleaned_literal"
+    key = identity.casefold().replace("ё", "е").replace("‐", "-").replace("‑", "-")
+    return dict(key=key, named=True, identity=identity, method=method)
 
 
 def classify_name_dictionary(layer_name):
@@ -1526,6 +1590,27 @@ def handle_client(client_socket):
             return
         if kind == "cleanup":
             reply("answer", queue_preview_cleanup(message.get("message")))
+            return
+        if kind == "alphabet_names":
+            rows = message.get("message")
+            if not isinstance(rows, list) or not 1 <= len(rows) <= 500:
+                raise ValueError("alphabet_names payload must contain 1..500 entries")
+            state = register_active_request(request_id)
+            try:
+                result, seen = [], set()
+                for row in rows:
+                    if request_cancelled(state):
+                        reply("cancelled", "Operation cancelled")
+                        return
+                    if (not isinstance(row, dict) or type(row.get("id")) is not int or
+                            row["id"] in seen or not isinstance(row.get("name"), str) or len(row["name"]) > 4096):
+                        raise ValueError("Invalid alphabetical name entry")
+                    seen.add(row["id"])
+                    result.append(dict(id=row["id"], **alphabetical_name_key(row["name"])))
+                reply("cancelled", "Operation cancelled") if request_cancelled(state) else reply("answer", result)
+            finally:
+                unregister_active_request(request_id)
+                last_request_time = time.monotonic()
             return
         if kind == "gender_names":
             rows = message.get("message")
