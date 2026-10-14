@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.14 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.18 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -43,7 +43,7 @@
 
 $.localize = true;
 
-var ver = '0.10.14',
+var ver = '0.10.18',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -166,10 +166,6 @@ function main() {
         layoutPlan = runLayoutProgressStage('Calculating selection packing', function () {
             return useGender ? buildGenderAwareLayoutPlan(items, selectionGeometry) : buildLayoutPlan(items, selectionGeometry);
         }, 32, 55);
-        if (cfg.lockForAction && !lockedLayoutActive()) {
-            actionLayoutProfile = profileFromLayout(layoutPlan);
-            layoutPlan = freezeLayoutMetrics(layoutPlan, selectionGeometry);
-        }
         layoutPlan.genderSummary = genderSummary;
         if (semanticRequested) runLayoutProgressStage('Semantic ordering', function () {
             var useColor = !!(analysis.color && !analysis.color.fallbackToGeometry),
@@ -187,6 +183,13 @@ function main() {
             }
             layoutPlan.colorSummary = analysis.color;
         });
+        // A fixed Action captures the FINAL successful scale/Y geometry after semantic
+        // ordering. Left/Center/Right also lock one common X gap; Justify deliberately
+        // recalculates X per current row on every playback.
+        if (cfg.lockForAction && !lockedLayoutActive()) {
+            actionLayoutProfile = profileFromLayout(layoutPlan);
+            layoutPlan = freezeLayoutMetrics(layoutPlan, selectionGeometry);
+        }
         runLayoutProgressStage('Validating layout', function () {
             validateLayoutPlan(layoutPlan, selectionGeometry);
             layoutUnitProgress(1, 2, 'Bounds and overlaps checked');
@@ -239,8 +242,12 @@ function hasLayoutActionParameters(d) {
 function readLockedActionProfile(d) {
     try {
         if (!d.hasKey(app.stringIDToTypeID('lockedReady')) || !d.getBoolean(app.stringIDToTypeID('lockedReady'))) return null;
-        var result = { scale: Number(d.getDouble(app.stringIDToTypeID('lockedScale'))),
-            gapX: Number(d.getDouble(app.stringIDToTypeID('lockedGapX'))), gapY: Number(d.getDouble(app.stringIDToTypeID('lockedGapY'))) };
+        var result = {
+            scale: Number(d.getDouble(app.stringIDToTypeID('lockedScale'))),
+            gapY: Number(d.getDouble(app.stringIDToTypeID('lockedGapY'))),
+            gapX: Number(d.getDouble(app.stringIDToTypeID('lockedGapX'))),
+            frames: decodeLockedFrames(String(d.getString(app.stringIDToTypeID('lockedFrames'))))
+        };
         validateLockedProfile(result);
         return result;
     } catch (e) { return null; }
@@ -248,8 +255,9 @@ function readLockedActionProfile(d) {
 
 function validateLockedProfile(profile) {
     if (!profile || typeof profile.scale != 'number' || !isFinite(profile.scale) || profile.scale <= 0 ||
+        typeof profile.gapY != 'number' || !isFinite(profile.gapY) || profile.gapY < 0 ||
         typeof profile.gapX != 'number' || !isFinite(profile.gapX) || profile.gapX < 0 ||
-        typeof profile.gapY != 'number' || !isFinite(profile.gapY) || profile.gapY < 0)
+        !validLockedFrames(profile.frames))
         throw new Error(str.t('В экшене нет корректного масштаба и интервалов. Запишите шаг заново на готовой раскладке.', 'The action does not contain valid scale and gap values. Record the step again using a completed layout.'));
 }
 
@@ -271,30 +279,112 @@ function runAutoLayoutEntry() {
     if (actionPlayback && cfg.lockForAction) validateLockedProfile(actionLayoutProfile);
     app.doProgress('Auto Layout', 'main();');
     if (!runSucceeded) { isCancelled = true; return; }
-    cfg.putScriptSettings(true); // Actual calculated metrics are recorded only after a successful job.
+    if (!actionPlayback) cfg.putScriptSettings(true); // Recording publishes parameters only after a successful manual run.
 }
 
 function lockedLayoutActive() {
     return !!(cfg.lockForAction && typeof actionLayoutProfile != 'undefined' && actionLayoutProfile);
 }
 
+// Absolute frame-size classes, independent of layer IDs and photo count.
+// Plain numeric pairs avoid eval and JSON dependencies in ExtendScript.
+function validLockedFrames(frames) {
+    if (!frames || !frames.length || frames.length > 10000) return false;
+    for (var i = 0; i < frames.length; i++) {
+        var f = frames[i];
+        if (!f || f.length != 2 || typeof f[0] != 'number' || typeof f[1] != 'number' ||
+            !isFinite(f[0]) || !isFinite(f[1]) || f[0] <= 0 || f[1] <= 0) return false;
+    }
+    return true;
+}
+
+function decodeLockedFrames(text) {
+    var pairs = text.split(';'), frames = [];
+    if (pairs.length > 10000) return null;
+    for (var i = 0; i < pairs.length; i++) {
+        var pair = pairs[i].split(',');
+        if (pair.length != 2 || !pair[0] || !pair[1]) return null;
+        frames.push([Number(pair[0]), Number(pair[1])]);
+    }
+    return validLockedFrames(frames) ? frames : null;
+}
+
+function encodeLockedFrames(frames) {
+    var pairs = [];
+    for (var i = 0; i < frames.length; i++) pairs.push(frames[i][0] + ',' + frames[i][1]);
+    return pairs.join(';');
+}
+
+function matchesLockedFrame(width, height, frames, tolerance) {
+    var eps = tolerance == undefined ? 0.05 : tolerance;
+    for (var i = 0; i < frames.length; i++)
+        if (Math.abs(width - frames[i][0]) <= eps && Math.abs(height - frames[i][1]) <= eps) return true;
+    return false;
+}
+
+function resolveLockedScale(items, profile) {
+    var candidates = [profile.scale], best = null, bestError = 1e100, bestDistance = 1e100;
+    for (var f = 0; f < profile.frames.length; f++) {
+        var w = items[0].width, h = items[0].height, target = profile.frames[f];
+        candidates.push(target[0] / w);
+        candidates.push(target[1] / h);
+        candidates.push((target[0] * w + target[1] * h) / (w * w + h * h));
+    }
+    for (var c = 0; c < candidates.length; c++) {
+        var scale = candidates[c], valid = isFinite(scale) && scale > 0, error = 0;
+        for (var i = 0; valid && i < items.length; i++) {
+            var frameError = 1e100;
+            for (var f = 0; f < profile.frames.length; f++)
+                frameError = Math.min(frameError, Math.max(Math.abs(items[i].width * scale - profile.frames[f][0]),
+                    Math.abs(items[i].height * scale - profile.frames[f][1])));
+            valid = frameError <= 1.01; // Allow Photoshop's one-pixel raster-bound rounding.
+            error = Math.max(error, frameError);
+        }
+        var distance = Math.abs(Math.log(scale / profile.scale));
+        if (valid && (error < bestError - 1e-9 || (Math.abs(error - bestError) <= 1e-9 && distance < bestDistance))) {
+            best = scale; bestError = error; bestDistance = distance;
+        }
+    }
+    if (best == null) throw new Error(str.t(
+        'Размеры исходных рамок несовместимы с экшеном: единый масштаб не воспроизводит записанные размеры. Используйте рамки исходных пропорций и относительных размеров или запишите новый экшен.',
+        'The source frames are incompatible with this action: one common scale cannot reproduce the recorded sizes. Use the original frame proportions and relative sizes, or record a new action.'));
+    return best;
+}
+
+function lockedRuntimeScale() {
+    return actionLayoutProfile.runtimeScale != undefined ? actionLayoutProfile.runtimeScale : actionLayoutProfile.scale;
+}
+
 function profileFromLayout(plan) {
-    var p = { scale: plan.commonScale,
+    var p = {
+        scale: plan.commonScale,
+        gapY: plan.actualGapY > 0 ? plan.actualGapY : plan.minFinalGapY,
         gapX: plan.actualGapXMin > 0 ? plan.actualGapXMin : plan.minFinalGapX,
-        gapY: plan.actualGapY > 0 ? plan.actualGapY : plan.minFinalGapY };
+        frames: []
+    };
+    for (var i = 0; i < plan.placements.length; i++) {
+        var item = plan.placements[i];
+        if (!matchesLockedFrame(item.width, item.height, p.frames)) p.frames.push([item.width, item.height]);
+    }
     validateLockedProfile(p);
     return p;
 }
 
-function lockedGapPolicy(specs, profile) {
-    var grouped = {}, adjacent = false;
+function lockedGapPolicy(specs, profile, baseGapX) {
+    // A fixed action uses one global X gap, including Justify.
+    var byRow = {}, adjacent = false;
     for (var i = 0; i < specs.length; i++) {
-        var count = specs[i].items.length;
-        grouped[String(count)] = count > 1 ? profile.gapX : 0;
+        var count = specs[i].items.length, gap = count > 1 ? profile.gapX : 0;
+        byRow[String(i)] = gap;
         if (count > 1) adjacent = true;
     }
-    return { minFinalGapX: profile.gapX, actualGapX: profile.gapX, grouped: grouped,
-        actualGapXMin: adjacent ? profile.gapX : 0, actualGapXMax: adjacent ? profile.gapX : 0 };
+    return {
+        minFinalGapX: profile.gapX,
+        actualGapX: profile.gapX,
+        byRow: byRow,
+        actualGapXMin: adjacent ? profile.gapX : 0,
+        actualGapXMax: adjacent ? profile.gapX : 0
+    };
 }
 
 function freezeLayoutMetrics(plan, geometry) {
@@ -304,8 +394,9 @@ function freezeLayoutMetrics(plan, geometry) {
         specs.push({ items: row.items.slice(0), contentWidth: row.contentWidth, rowHeight: row.rowHeight,
             top: row.y, interval: row.availableInterval, zoneIndex: row.zoneIndex, componentIndex: row.componentIndex });
     }
-    var frozen = finalizeLayoutRows(specs, profile.scale, profile.gapX / profile.scale, profile.gapY / profile.scale,
-        profile.gapY, plan, lockedGapPolicy(specs, profile));
+    var baseGapX = profile.gapX / profile.scale,
+        frozen = finalizeLayoutRows(specs, profile.scale, baseGapX, profile.gapY / profile.scale,
+            plan.actualGapY, plan, lockedGapPolicy(specs, profile, baseGapX));
     if (!frozen) throw new Error(str.t('Не удалось зафиксировать интервалы раскладки.', 'Could not lock the layout gaps.'));
     frozen.autoRows = plan.autoRows;
     frozen.lockedMetrics = true;
@@ -316,7 +407,10 @@ function freezeLayoutMetrics(plan, geometry) {
 function buildLockedLayoutPlan(items, geometry) {
     var profile = actionLayoutProfile;
     validateLockedProfile(profile);
-    var scale = profile.scale, gx = profile.gapX / scale, gy = profile.gapY / scale, zones;
+    var scale = resolveLockedScale(items, profile),
+        gx = profile.gapX / scale,
+        gy = profile.gapY / scale, zones;
+    profile.runtimeScale = scale;
     if (geometry.isRectangle) {
         zones = [{ left: geometry.bounds.left, right: geometry.bounds.right, top: geometry.bounds.top,
             bottom: geometry.bounds.bottom, width: geometry.bounds.width, height: geometry.bounds.height,
@@ -325,13 +419,15 @@ function buildLockedLayoutPlan(items, geometry) {
         if (!geometry.multiZone) buildStableLayoutZones(geometry.bands, geometry.components, GEOMETRY_EPS);
         zones = flattenComponentZones(geometry.components);
     }
-    var allocation = findMultiZoneAllocation(items, zones, scale, gx, gy, buildFastShapeSegmentCache(items),
-        cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)), geometry.componentCount || 1);
+    var desiredRows = cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)),
+        allocation = findMultiZoneAllocation(items, zones, scale, gx, gy, buildFastShapeSegmentCache(items),
+            desiredRows, geometry.componentCount || 1);
     if (!allocation) throw new Error(str.t('Фотографии не помещаются при масштабе и интервалах, записанных в экшене. Уменьшите количество фото или запишите новую раскладку.', 'The photos do not fit with the scale and gaps recorded in the action. Reduce the number of photos or record a new layout.'));
-    var specs = [], groups = [];
+    var specs = [], groups = [], hasLockedVerticalGap = false;
     for (var a = 0; a < allocation.assignments.length; a++) {
         var assignment = allocation.assignments[a];
         if (!assignment || !assignment.rows.length) continue;
+        if (assignment.rows.length > 1) hasLockedVerticalGap = true;
         var zone = zones[assignment.zoneIndex], start = assignment.start, indices = [];
         for (var r = 0; r < assignment.rows.length; r++) {
             var packed = assignment.rows[r]; indices.push(specs.length);
@@ -344,10 +440,10 @@ function buildLockedLayoutPlan(items, geometry) {
         if (!placeContainerVerticalGroup(specs, indices, scale, profile.gapY, zone.top, zone.bottom))
             throw new Error(str.t('Ряды не помещаются с зафиксированным интервалом.', 'The rows do not fit with the locked gap.'));
     }
-    var plan = finalizeLayoutRows(specs, scale, gx, gy, profile.gapY, {
+    var plan = finalizeLayoutRows(specs, scale, gx, gy, hasLockedVerticalGap ? profile.gapY : 0, {
         shapedSelection: !geometry.isRectangle, multiZoneSelection: !!geometry.multiZone,
         zoneCount: zones.length, usedZoneCount: allocation.usedZones, usedComponentCount: allocation.usedComponentCount,
-        solverPasses: 1, lockedMetrics: true }, lockedGapPolicy(specs, profile));
+        solverPasses: 1, lockedMetrics: true }, lockedGapPolicy(specs, profile, gx));
     if (!plan) throw new Error(str.t('Не удалось построить раскладку с параметрами экшена.', 'Could not build a layout using the action parameters.'));
     plan.autoRows = cfg.autoRows;
     validateLayoutPlan(plan, geometry);
@@ -547,6 +643,10 @@ function dialog(editingAction) {
     chLockAction.value = !!cfg.lockForAction;
     chLockAction.onClick = function () { cfg.lockForAction = !!this.value; };
     chLockAction.helpTip = str.lockActionTip;
+    if (editingAction && !cfg.lockForAction && !actionLayoutProfile) {
+        chLockAction.enabled = false;
+        chLockAction.helpTip = str.lockActionRecordFirst;
+    }
     cancel.text = str.cancel
 
     chAutoRows.value = cfg.autoRows
@@ -649,6 +749,10 @@ function dialog(editingAction) {
     ok.onClick = function () {
         // Read the selected item explicitly, even if ScriptUI skipped onChange.
         if (dlColor.selection) cfg.colorMode = colorModeFromSelection(dlColor.selection);
+        if (editingAction && cfg.lockForAction && !actionLayoutProfile) {
+            alert(str.lockActionRecordFirst, 'Auto layout');
+            return;
+        }
         dlg.close(1);
     };
 
@@ -788,8 +892,11 @@ function Locale() {
     this.layoutLayers = this.t('Разложить слои', 'Arrange layers');
     this.lockAction = this.t('фиксировать отступы и трансформацию', 'lock gaps and transform');
     this.lockActionTip = this.t(
-        'В экшен записываются реальный масштаб и интервалы X/Y. Число фотографий может меняться; параметры размера и интервалов сохраняются.',
-        'The actual scale and X/Y gaps are recorded in the action. The number of photos may change; size and gap parameters remain fixed.');
+        'В экшен записываются размеры рамок в пикселях и общие интервалы X/Y. Количество фото может меняться. При фиксации режим «По ширине» центрирует ряды с единым сохранённым X-интервалом. Несовместимые размеры исходников останавливают раскладку.',
+        'Records frame sizes in pixels and common X/Y gaps. Photo count may change. With locking enabled, Justify centers rows using the saved common X gap. Incompatible source dimensions stop the layout.');
+    this.lockActionRecordFirst = this.t(
+        'Чтобы включить фиксацию, заново запишите шаг Auto Layout на готовой раскладке: масштаб и интервалы вычисляются только во время успешного запуска.',
+        'To enable locking, record the Auto Layout step again on a completed layout: scale and gaps are calculated only during a successful run.');
     this.cancel = this.t('Отмена', 'Cancel');
     this.colorOff = this.t('Не учитывать', 'Do not use');
     this.colorHarmonious = this.t('Согласованные цвета', 'Harmonious colors');
@@ -840,8 +947,9 @@ function Config() {
                 validateLockedProfile(actionLayoutProfile);
                 d.putBoolean(app.stringIDToTypeID('lockedReady'), true);
                 d.putDouble(app.stringIDToTypeID('lockedScale'), actionLayoutProfile.scale);
-                d.putDouble(app.stringIDToTypeID('lockedGapX'), actionLayoutProfile.gapX);
                 d.putDouble(app.stringIDToTypeID('lockedGapY'), actionLayoutProfile.gapY);
+                d.putDouble(app.stringIDToTypeID('lockedGapX'), actionLayoutProfile.gapX);
+                d.putString(app.stringIDToTypeID('lockedFrames'), encodeLockedFrames(actionLayoutProfile.frames));
             }
             app.playbackParameters = d;
         } else app.putCustomOptions(UUID, d, true)
@@ -2036,13 +2144,18 @@ function applyPreparedLayoutPlan(preparedMap) {
             var p = layoutPlan.placements[i], entry = preparedMap[String(p.layerId)];
             if (!entry) throw new Error(str.t('Не найден исходный объект для "', 'Source object not found for "') + p.name + str.t('".', '".'));
             layoutUnitProgress(i, total, i + '/' + total);
-            lr.selectLayers(entry.roots);
             var transformBounds = getPreparedUnitTransformBounds(entry.roots),
                 cx = transformBounds.centerX, cy = transformBounds.centerY,
                 scaledProxyLeft = cx + (entry.proxy.left - cx) * scale,
                 scaledProxyTop = cy + (entry.proxy.top - cy) * scale;
             entry.transformOffsetX = p.left - scaledProxyLeft;
             entry.transformOffsetY = p.top - scaledProxyTop;
+            entry.expectedBounds = {
+                left: cx + (transformBounds.left - cx) * scale + entry.transformOffsetX,
+                top: cy + (transformBounds.top - cy) * scale + entry.transformOffsetY,
+                right: cx + (transformBounds.right - cx) * scale + entry.transformOffsetX,
+                bottom: cy + (transformBounds.bottom - cy) * scale + entry.transformOffsetY
+            };
             if (!isFinite(entry.transformOffsetX) || !isFinite(entry.transformOffsetY))
                 throw new Error(str.t('Не удалось рассчитать трансформацию исходного объекта "', 'Could not calculate the transform for source object "') + p.name + str.t('".', '".'));
             layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
@@ -2056,6 +2169,8 @@ function applyPreparedLayoutPlan(preparedMap) {
             lr.selectLayers(entry.roots);
             if (Math.abs(scale - 1) > 0.0000001 || Math.abs(entry.transformOffsetX) > 0.0001 || Math.abs(entry.transformOffsetY) > 0.0001)
                 lr.transformSelection(scale * 100, entry.transformOffsetX, entry.transformOffsetY);
+            if (layoutPlan.lockedMetrics)
+                validateAppliedBounds(entry.expectedBounds, getPreparedUnitTransformBounds(entry.roots), p.name);
             layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
         }
     });
@@ -2827,16 +2942,22 @@ function cleanupPreviews() {
 // scale and gaps. This permits useful cross-row swaps of different-size photos.
 function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
     var specs = [], fixed = { minFinalGapX: plan.minFinalGapX, actualGapX: plan.actualGapXMin,
-        actualGapXMin: plan.actualGapXMin, actualGapXMax: plan.actualGapXMax, grouped: {} }, r, c;
+        actualGapXMin: plan.actualGapXMin, actualGapXMax: plan.actualGapXMax, byRow: {} }, r, c;
     for (r = 0; r < itemRows.length; r++) {
-        var original = plan.rows[r], width = 0, height = 0;
-        for (c = 0; c < itemRows[r].length; c++) {
+        var original = plan.rows[r], width = 0, height = 0, count = itemRows[r].length,
+            intervalWidth = original.availableInterval.right - original.availableInterval.left;
+        for (c = 0; c < count; c++) {
             width += itemRows[r][c].width;
             height = Math.max(height, itemRows[r][c].height);
         }
-        fixed.grouped[String(itemRows[r].length)] = original.gapX;
-        if (width * plan.commonScale + original.gapX * Math.max(0, itemRows[r].length - 1) >
-            original.availableInterval.right - original.availableInterval.left + 1e-7) return null;
+        fixed.byRow[String(r)] = original.gapX;
+        // Left / Center / Right preserve one common visual gap during semantic swaps.
+        // Unlocked Justify is different: its gap is recalculated from the FINAL
+        // row contents so that the row still reaches both interval edges.
+        if (cfg.horizontalAlign != 'justify' &&
+            width * plan.commonScale + original.gapX * Math.max(0, count - 1) > intervalWidth + 1e-7) return null;
+        if (cfg.horizontalAlign == 'justify' && count > 1 &&
+            width * plan.commonScale + plan.minFinalGapX * (count - 1) > intervalWidth + 1e-7) return null;
         specs.push({ items: itemRows[r], contentWidth: width, rowHeight: height,
             interval: original.availableInterval, top: original.y,
             zoneIndex: original.zoneIndex, componentIndex: original.componentIndex });
@@ -2861,7 +2982,8 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
     } else {
         indices = [];
         for (r = 0; r < specs.length; r++) {
-            var spec = specs[r], needed = spec.contentWidth * plan.commonScale + plan.rows[r].gapX * Math.max(0, spec.items.length - 1),
+            var spec = specs[r], semanticGap = cfg.horizontalAlign == 'justify' ? plan.minFinalGapX : plan.rows[r].gapX,
+                needed = spec.contentWidth * plan.commonScale + semanticGap * Math.max(0, spec.items.length - 1),
                 ranges = getFastRowTopRanges(geometry, spec.rowHeight * plan.commonScale, needed), closest = null, distance = 1e100;
             for (var k = 0; k < ranges.length; k++) {
                 var range = ranges[k], d = Math.max(range.topMin - plan.rows[r].y, plan.rows[r].y - range.topMax, 0);
@@ -2878,7 +3000,8 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
     var metadata = {};
     copyDefinedPlanMetadata(metadata, plan, ['scaleX', 'scaleY', 'fitDifference', 'rhythmPenalty',
         'shapedSelection', 'multiZoneSelection', 'zoneCount', 'usedZoneCount', 'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics']);
-    var candidate = finalizeLayoutRows(specs, plan.commonScale, plan.baseGapX, plan.baseGapY, plan.actualGapY, metadata, fixed);
+    var semanticFixed = cfg.horizontalAlign == 'justify' ? null : fixed,
+        candidate = finalizeLayoutRows(specs, plan.commonScale, plan.baseGapX, plan.baseGapY, plan.actualGapY, metadata, semanticFixed);
     if (!candidate) return null;
     candidate.autoRows = plan.autoRows;
     candidate.genderSummary = plan.genderSummary;
@@ -3956,9 +4079,9 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
     if (!rowSpecs || !rowSpecs.length) return null;
 
     if (lockedLayoutActive()) {
-        if (Math.abs(commonScale - actionLayoutProfile.scale) > 1e-9) throw new Error(str.t('Изменился масштаб, зафиксированный в экшене.', 'The scale locked in the action has changed.'));
-        actualGapY = actionLayoutProfile.gapY;
-        fixedGapPolicy = lockedGapPolicy(rowSpecs, actionLayoutProfile);
+        if (Math.abs(commonScale - lockedRuntimeScale()) > 1e-9) throw new Error(str.t('Изменился масштаб, зафиксированный в экшене.', 'The scale locked in the action has changed.'));
+        fixedGapPolicy = lockedGapPolicy(rowSpecs, actionLayoutProfile, baseGapX);
+        if (!fixedGapPolicy) return null;
     }
     var gapPolicy = fixedGapPolicy || resolveHorizontalGapPolicy(rowSpecs, commonScale, baseGapX);
     if (!gapPolicy) return null;
@@ -3973,7 +4096,7 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
     for (var r = 0; r < rowSpecs.length; r++) {
         var spec = rowSpecs[r],
             count = spec.items.length,
-            rowGapX = getHorizontalGapForRow(gapPolicy, count),
+            rowGapX = getHorizontalGapForRow(gapPolicy, count, r),
             scaledContentWidth = spec.contentWidth * commonScale,
             finalRowWidth = scaledContentWidth + rowGapX * Math.max(0, count - 1),
             finalRowHeight = spec.rowHeight * commonScale,
@@ -4053,7 +4176,7 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
         scaleY: metadata.scaleY != undefined ? metadata.scaleY : commonScale,
         fitDifference: metadata.fitDifference != undefined ? metadata.fitDifference : 0,
         uniformGaps: cfg.horizontalAlign != 'justify',
-        groupedJustifyGaps: cfg.horizontalAlign == 'justify'
+        perRowJustifyGaps: cfg.horizontalAlign == 'justify'
     };
 
     copyDefinedPlanMetadata(plan, metadata, [
@@ -4067,7 +4190,7 @@ function resolveHorizontalGapPolicy(rowSpecs, commonScale, baseGapX) {
     var minFinalGapX = baseGapX * commonScale,
         maxFinalGapX = minFinalGapX * cfg.maxGapMultiplier,
         maxUniformGapX = 1e100,
-        grouped = {},
+        byRow = {},
         hasGap = false,
         actualGapX = 0,
         actualGapXMin = null,
@@ -4085,29 +4208,24 @@ function resolveHorizontalGapPolicy(rowSpecs, commonScale, baseGapX) {
         if (gapLimit < minFinalGapX - FIT_EPS) return null;
 
         if (cfg.horizontalAlign == 'justify') {
-            var key = String(count);
-            if (grouped[key] == undefined || gapLimit < grouped[key]) grouped[key] = gapLimit;
+            // Justify is intentionally per physical row: every row independently
+            // reaches both edges of its own available interval.
+            var rowGap = Math.max(minFinalGapX, gapLimit);
+            byRow[String(r)] = rowGap;
+            if (actualGapXMin == null || rowGap < actualGapXMin) actualGapXMin = rowGap;
+            if (actualGapXMax == null || rowGap > actualGapXMax) actualGapXMax = rowGap;
         } else if (gapLimit < maxUniformGapX) {
+            // Left / Center / Right always share one global X gap.
             maxUniformGapX = gapLimit;
         }
         hasGap = true;
     }
 
-    if (hasGap) {
-        if (cfg.horizontalAlign == 'justify') {
-            for (var gapKey in grouped) {
-                if (!grouped.hasOwnProperty(gapKey)) continue;
-                var groupedGap = Math.max(minFinalGapX, grouped[gapKey]);
-                grouped[gapKey] = groupedGap;
-                if (actualGapXMin == null || groupedGap < actualGapXMin) actualGapXMin = groupedGap;
-                if (actualGapXMax == null || groupedGap > actualGapXMax) actualGapXMax = groupedGap;
-            }
-        } else {
-            var horizontalCap = Math.min(maxFinalGapX, maxUniformGapX);
-            if (horizontalCap < minFinalGapX - FIT_EPS) return null;
-            actualGapX = Math.max(minFinalGapX, horizontalCap);
-            actualGapXMin = actualGapXMax = actualGapX;
-        }
+    if (hasGap && cfg.horizontalAlign != 'justify') {
+        var horizontalCap = Math.min(maxFinalGapX, maxUniformGapX);
+        if (horizontalCap < minFinalGapX - FIT_EPS) return null;
+        actualGapX = Math.max(minFinalGapX, horizontalCap);
+        actualGapXMin = actualGapXMax = actualGapX;
     }
 
     if (actualGapXMin == null) actualGapXMin = 0;
@@ -4116,15 +4234,19 @@ function resolveHorizontalGapPolicy(rowSpecs, commonScale, baseGapX) {
     return {
         minFinalGapX: minFinalGapX,
         actualGapX: actualGapX,
-        grouped: grouped,
+        byRow: byRow,
         actualGapXMin: actualGapXMin,
         actualGapXMax: actualGapXMax
     };
 }
 
-function getHorizontalGapForRow(policy, count) {
+function getHorizontalGapForRow(policy, count, rowIndex) {
     if (count <= 1) return 0;
-    return cfg.horizontalAlign == 'justify' ? policy.grouped[String(count)] : policy.actualGapX;
+    if (cfg.horizontalAlign == 'justify') {
+        var gap = policy.byRow ? Number(policy.byRow[String(rowIndex)]) : NaN;
+        return isFinite(gap) && gap >= 0 ? gap : policy.minFinalGapX;
+    }
+    return policy.actualGapX;
 }
 
 function alignRowLeft(interval, rowWidth, count) {
@@ -4136,7 +4258,10 @@ function alignRowLeft(interval, rowWidth, count) {
         case 'left': return interval.left;
         case 'right': return interval.right - rowWidth;
         case 'justify':
-            return count > 1 && Math.abs(freeX) <= FIT_EPS ? interval.left : interval.left + freeX / 2;
+            // With 2+ photos Justify is a hard invariant: the row reaches both edges.
+            // A one-photo row has no inter-photo gap to stretch and is centered.
+            if (count <= 1 || lockedLayoutActive()) return interval.left + freeX / 2;
+            return Math.abs(freeX) <= FIT_EPS ? interval.left : null;
         default:
             return interval.left + freeX / 2;
     }
@@ -4598,9 +4723,11 @@ function buildZonePackingOptions(items, start, maxItems, zone, scale, minGapX, m
 
             for (count = 1; consumed + count <= maxItems; count++) {
                 var metrics = cache.segments[start + consumed][count],
-                    rowWidth = metrics.contentWidth * scale + Math.max(0, count - 1) * minGapX;
+                    rowGapX = minGapX,
+                    rowWidth = metrics.contentWidth * scale + Math.max(0, count - 1) * rowGapX;
 
-                // A packing tolerance must never push a row across a hole boundary.
+                // Capacity is checked at the minimum allowed gap. In Justify the
+                // final gap is recomputed later so the accepted row reaches both edges.
                 if (rowWidth > zone.width + 1e-9) break;
 
                 var rowHeight = metrics.rowHeight * scale,
@@ -5210,6 +5337,22 @@ function validateLayoutPlan(plan, geometry) {
     if (!isFinite(plan.commonScale) || plan.commonScale <= 0)
         throw new Error(str.t('Некорректный общий масштаб.', 'Invalid common scale.'))
 
+    if (plan.lockedMetrics && lockedLayoutActive()) {
+        var previousRows = {};
+        for (var r = 0; r < plan.rows.length; r++) {
+            var row = plan.rows[r], zoneKey = String(row.zoneIndex == undefined ? 0 : row.zoneIndex), previous = previousRows[zoneKey];
+            if (previous && Math.abs(row.y - previous.y - previous.rowHeight * plan.commonScale - actionLayoutProfile.gapY) > 1e-7)
+                throw new Error(str.t('Изменился Y-интервал экшена.', 'The action Y gap has changed.'));
+            previousRows[zoneKey] = row;
+            if (row.items.length > 1 && Math.abs(row.gapX - actionLayoutProfile.gapX) > 1e-7)
+                throw new Error(str.t('Изменился X-интервал экшена.', 'The action X gap has changed.'));
+        }
+        for (var q = 0; q < plan.placements.length; q++) {
+            var frame = plan.placements[q];
+            if (!matchesLockedFrame(frame.right - frame.left, frame.bottom - frame.top, actionLayoutProfile.frames, 1.01))
+                throw new Error(str.t('Изменился размер рамки экшена.', 'An action frame size has changed.'));
+        }
+    }
     var eps = 0.05, seenIds = {}, sourceIds = {};
     for (var si = 0; si < sourceState.layerIds.length; si++) sourceIds[String(sourceState.layerIds[si])] = true;
     for (var i = 0; i < plan.placements.length; i++) {
@@ -5257,6 +5400,21 @@ function rectanglesOverlap(a, b, eps) {
         a.top < b.bottom - eps && a.bottom > b.top + eps
 }
 
+// Photoshop raster bounds can round to whole pixels. This checks native
+// results, not just planned coordinates; larger deviations cause history rollback.
+function validateAppliedBounds(expected, actual, name) {
+    var eps = 1.01, keys = ['left', 'top', 'right', 'bottom'];
+    for (var i = 0; i < keys.length; i++) {
+        var key = keys[i];
+        if (!isFinite(Number(actual[key])) || Math.abs(Number(actual[key]) - expected[key]) > eps)
+            throw new Error(str.t('Photoshop не воспроизвёл записанную геометрию объекта "',
+                'Photoshop did not reproduce the recorded geometry of object "') + name + str.t('".', '".'));
+    }
+    if (Math.abs((actual.right - actual.left) - (expected.right - expected.left)) > eps ||
+        Math.abs((actual.bottom - actual.top) - (expected.bottom - expected.top)) > eps)
+        throw new Error(str.t('Photoshop изменил размер рамки объекта "', 'Photoshop changed the frame size of object "') + name + str.t('".', '".'));
+}
+
 function applyLayoutPlan() {
     if (!layoutPlan || !layoutPlan.placements) throw new Error(str.t('Нет рассчитанного LayoutPlan.', 'No calculated LayoutPlan is available.'))
 
@@ -5292,6 +5450,11 @@ function applyLayoutPlan() {
             if (!isFinite(actualLeft) || !isFinite(actualTop) || !isFinite(dX) || !isFinite(dY))
                 throw new Error(str.t('Не удалось рассчитать итоговое положение слоя "', 'Could not calculate the final position of layer "') + p.name + str.t('".', '".'));
             if (Math.abs(dX) > 0.0001 || Math.abs(dY) > 0.0001) lr.move(dX, dY);
+            if (layoutPlan.lockedMetrics) {
+                var applied = lr.getProperty('boundsNoEffects', p.layerId);
+                if (!applied || !applied.value) throw new Error(str.t('Не удалось проверить итоговые границы рамки.', 'Could not verify the final frame bounds.'));
+                validateAppliedBounds(p, lr.descToObject(applied.value), p.name);
+            }
             layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
         }
     });

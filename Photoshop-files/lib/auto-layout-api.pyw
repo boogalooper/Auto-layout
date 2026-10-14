@@ -80,7 +80,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.14"
+SERVER_ID = "auto-layout/0.10.18"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 
@@ -1320,15 +1320,14 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
             has_vertical = True
             gap_y = min(gap_y, (z["height"] - sum(r["rowHeight"] for r in rows) * scale) / (len(rows) - 1))
     gap_y = max(gy * scale, gap_y) if has_vertical else 0.0
-    gaps = {}
     uniform_gap = gx * scale * multiplier
-    for row in row_specs:
-        count = len(row["ids"])
-        if count > 1:
-            limit = (zones[row["zoneIndex"]]["width"] - row["contentWidth"] * scale) / (count - 1)
-            uniform_gap = min(uniform_gap, limit)
-            gaps[count] = min(gaps.get(count, math.inf), limit)
-    uniform_gap = max(gx * scale, uniform_gap)
+    if align != "justify":
+        for row in row_specs:
+            count = len(row["ids"])
+            if count > 1:
+                limit = (zones[row["zoneIndex"]]["width"] - row["contentWidth"] * scale) / (count - 1)
+                uniform_gap = min(uniform_gap, limit)
+        uniform_gap = max(gx * scale, uniform_gap)
     placements = []
     by_id = {i["id"]: i for i in order}
     for z in zones:
@@ -1337,9 +1336,16 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
         top = z["top"] + (z["height"] - height) / 2
         for row in rows:
             count = len(row["ids"])
-            gap_x = gaps.get(count, 0.0) if align == "justify" else uniform_gap if count > 1 else 0.0
+            if align == "justify" and count > 1:
+                # Justify is per concrete physical row. Two rows with the same
+                # number of photos may have different gaps when their total
+                # photo widths differ. Horizontal max-gap multiplier does not
+                # limit Justify; the row reaches both zone edges exactly.
+                gap_x = (z["width"] - row["contentWidth"] * scale) / (count - 1)
+            else:
+                gap_x = uniform_gap if count > 1 else 0.0
             width = row["contentWidth"] * scale + max(0, count - 1) * gap_x
-            x = z["left"] if align == "left" else z["right"] - width if align == "right" else z["left"] + (z["width"] - width) / 2
+            x = z["left"] if align == "left" or (align == "justify" and count > 1) else z["right"] - width if align == "right" else z["left"] + (z["width"] - width) / 2
             row.update(top=top, gapX=gap_x)
             for id_ in row["ids"]:
                 item = by_id[id_]
