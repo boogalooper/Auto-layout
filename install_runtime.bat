@@ -146,13 +146,13 @@ echo ==============================================
 echo Runtime: %RUNTIME%
 echo.
 echo Photoshop folder should contain:
-echo   Auto-layout-v*.jsx
+echo   Auto-layout.jsx
 echo   lib\auto-layout-api.pyw
 echo.
 echo Models are stored in:
 echo   %MODELS%
 echo.
-echo Copy "Photoshop-files\Auto-layout-v*.jsx" and the "lib" folder
+echo Copy "Photoshop-files\Auto-layout.jsx" and the "lib" folder
 echo into the Photoshop Scripts folder if you have not done so yet.
 echo.
 pause
