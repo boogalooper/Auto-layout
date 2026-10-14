@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.9 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.13 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -25,7 +25,7 @@
  *  - orthogonal Photoshop selections, including disconnected areas, holes and open cut-outs;
  *  - connected selected components are identified independently from holes/cut-outs;
  *  - each connected component owns its stable rectangular layout zones;
- *  - pixel, shape and Smart Object layers; groups/linked sets are prepared as Smart Objects;
+ *  - pixel, shape and Smart Object layers; groups/linked sets use temporary Smart Object proxies for measurement and remain editable after layout;
  *  - automatic or fixed row count;
  *  - selectable soft vertical row rhythm (auto / wider center / wider edges / alternating);
  *  - optional boy/girl checkerboard ordering using Cyrillic names first and local image fallback;
@@ -41,7 +41,7 @@
  *  - every row can be placed into its own Photoshop layer group.
  */
 
-var ver = '0.10.9',
+var ver = '0.10.13',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -71,6 +71,7 @@ var s2t = stringIDToTypeID,
     semanticImageAnalysisDisabledForRun = false,
     semanticImageEmptyStreak = 0,
     semanticImageFallbackReason = '',
+    selectedLayerDescriptorCache = null,
     layoutPlan = null,
     sourceState = null,
     inputPreparation = null,
@@ -121,6 +122,7 @@ function main() {
     semanticImageAnalysisDisabledForRun = false;
     semanticImageEmptyStreak = 0;
     semanticImageFallbackReason = '';
+    selectedLayerDescriptorCache = null;
     var historyState;
     inputPreparation = null; preparedAnalysisItems = null; sourceState = null;
     try {
@@ -151,8 +153,10 @@ function main() {
         if (semanticRequested) runLayoutProgressStage('Анализ фотографий', function () {
             analysis = analyzeSemantics(items);
             genderSummary = analysis.gender; headTurnSummary = analysis.headTurn;
-            refreshLayoutLayerReferences(items);
-            restoreLayerSelection(sourceState.layerIds, sourceState.activeLayerId);
+            if (analysis.previewHistoryTouched) {
+                refreshLayoutLayerReferences(items);
+                restoreLayerSelection(sourceState.layerIds, sourceState.activeLayerId);
+            }
             useGender = !!(genderSummary && !genderSummary.fallbackToGeometry);
             useHead = !!(headTurnSummary && !headTurnSummary.fallbackToGeometry);
         }, 30, 32);
@@ -195,6 +199,7 @@ function main() {
         runLayoutProgressStage('Восстановление выделения слоёв', function () {
             restoreLayerSelection(sourceState.layerIds, sourceState.activeLayerId);
         });
+        if (shouldCollapseAllGroupsAfterLayout()) collapseAllLayerGroups();
         layoutProgressRun.active = false;
         app.changeProgressText('Готово');
         if (app.updateProgress(100, 100) === false) throwCancelled();
@@ -372,8 +377,8 @@ function renderLayoutProgress() {
     var stageNames = { 'Подготовка и выделение': 'Выделение', 'Чтение размеров слоёв': 'Размеры',
         'Анализ фотографий': 'Анализ', 'Расчёт заполнения выделения': 'Расчёт',
         'Расстановка по признакам': 'Порядок', 'Проверка раскладки': 'Проверка',
-        'Общий масштаб слоёв': 'Масштаб', 'Позиционирование фотографий': 'Позиции',
-        'Восстановление выделения слоёв': 'Выделение слоёв', 'Группировка рядов': 'Группы', 'Подготовка объектов для анализа': 'Объекты', 'Подготовка итоговых объектов': 'Смарт-объекты' },
+        'Общий масштаб слоёв': 'Масштаб', 'Позиционирование фотографий': 'Позиции', 'Расчёт трансформаций объектов': 'Трансформации', 'Трансформация исходных объектов': 'Исходные объекты',
+        'Восстановление выделения слоёв': 'Выделение слоёв', 'Группировка рядов': 'Группы', 'Подготовка объектов для анализа': 'Объекты', 'Восстановление исходных объектов': 'Исходные слои' },
         title = run.index + '. ' + (stageNames[run.name] || run.name),
         detail = run.waiting ? 'ожидание Python' : String(run.detail || '');
     if (title.length > 22) title = title.substr(0, 21) + '…';
@@ -687,7 +692,7 @@ function canRun() {
     try {
         return !!(apl.getProperty('numberOfDocuments') &&
             doc.getProperty('selection') &&
-            getSelectedLayerIds().length)
+            getSelectedLayerCount())
     } catch (e) {
         return false
     }
@@ -809,35 +814,61 @@ function Config() {
     }
 }
 
-function collectDocumentState() {
-    var ids = getSelectedLayerIds();
-    if (!ids.length) throw new Error('Не выбраны слои для раскладки.')
+function readSelectedLayerSnapshot() {
+    var sel = doc.getProperty('targetLayersIDs'), selected = [], output = [], descriptors = {};
+    if (!sel || !sel.count) return { ids: output, descriptors: descriptors };
 
+    for (var i = 0; i < sel.count; i++) {
+        var id = sel.getReference(i).getIdentifier(), d = lr.getDescriptor(id, false), itemIndex = NaN;
+        if (d && d.hasKey(s2t('itemIndex'))) itemIndex = d.getInteger(s2t('itemIndex'));
+        else itemIndex = Number(lr.getProperty('itemIndex', id));
+        if (!isFinite(itemIndex)) throw new Error('Не удалось определить положение выбранного слоя в палитре.');
+        selected.push({ id: id, itemIndex: itemIndex });
+        if (d) descriptors[String(id)] = d;
+    }
+
+    selected.sort(function (a, b) { return a.itemIndex < b.itemIndex ? 1 : -1 });
+    for (i = 0; i < selected.length; i++) output.push(selected[i].id);
+    return { ids: output, descriptors: descriptors };
+}
+
+function collectDocumentState() {
+    var snapshot = readSelectedLayerSnapshot(), ids = snapshot.ids;
+    if (!ids.length) throw new Error('Не выбраны слои для раскладки.');
+
+    // Keep these exact descriptors for buildInputPreparation/collectLayoutItems.
+    // This removes the former second ActionManager read of every selected layer.
+    selectedLayerDescriptorCache = snapshot.descriptors;
     var activeId = lr.getProperty('layerID');
     return {
         layerIds: ids.slice(0),
         activeLayerId: activeId,
         originalLayerIds: ids.slice(0),
         originalActiveLayerId: activeId
-    }
+    };
 }
 
 function getSelectedLayerIds() {
-    var sel = doc.getProperty('targetLayersIDs'),
-        selected = [],
-        output = [];
+    return readSelectedLayerSnapshot().ids;
+}
 
-    if (!sel || !sel.count) return output
+function getSelectedLayerCount() {
+    var sel = doc.getProperty('targetLayersIDs');
+    return sel && sel.count ? sel.count : 0;
+}
 
-    for (var i = 0; i < sel.count; i++) {
-        var id = sel.getReference(i).getIdentifier();
-        selected.push({ id: id, itemIndex: lr.getProperty('itemIndex', id) })
+function selectedLayerSetMatches(ids) {
+    if (!ids) return false;
+    var sel = doc.getProperty('targetLayersIDs');
+    if (!sel || sel.count != ids.length) return false;
+    var wanted = {}, i;
+    for (i = 0; i < ids.length; i++) wanted[String(ids[i])] = true;
+    for (i = 0; i < sel.count; i++) {
+        var id = sel.getReference(i).getIdentifier(), key = String(id);
+        if (!wanted[key]) return false;
+        delete wanted[key];
     }
-
-    selected.sort(function (a, b) { return a.itemIndex < b.itemIndex ? 1 : -1 })
-    for (i = 0; i < selected.length; i++) output.push(selected[i].id)
-
-    return output
+    return true;
 }
 
 function collectSelectionGeometryWithHistory() {
@@ -1698,14 +1729,21 @@ function collectPreparationLayers() {
 }
 
 function buildInputPreparation(ids) {
-    var needed = false;
+    var needed = false, cache = selectedLayerDescriptorCache || {};
+    // The snapshot belongs to the current unmodified document only. If input
+    // preparation becomes necessary it is discarded before Photoshop changes it.
+    selectedLayerDescriptorCache = null;
     for (var i = 0; i < ids.length; i++) {
         if (i % 20 == 0) progress(0, 'Выбор ' + i + '/' + ids.length);
-        var d = lr.getDescriptor(ids[i], false);
+        var key = String(ids[i]), d = cache[key] || lr.getDescriptor(ids[i], false);
         if (!d) throw new Error('Один из выбранных слоёв недоступен.');
+        cache[key] = d;
         var node = readPreparationLayer(d, 0);
         if (node.section == 'layerSectionStart' || node.links.length) needed = true;
     }
+    // If no preparation is required, the same descriptors can also supply
+    // bounds/type/name to collectLayoutItems with no additional AM round-trip.
+    selectedLayerDescriptorCache = needed ? null : cache;
     if (!needed) return null;
     return planInputPreparation(collectPreparationLayers(), ids);
 }
@@ -1838,103 +1876,191 @@ function prepareLayoutSources() {
 }
 
 function commitPreparedLayout() {
-    runLayoutProgressStage('Подготовка итоговых объектов', function () {
-        // Original IDs must still resolve before any final conversion.
-        for (var i = 0; i < inputPreparation.units.length; i++) for (var r = 0; r < inputPreparation.units[i].roots.length; r++) {
-            var original = inputPreparation.units[i].roots[r];
-            if (lr.getProperty('name', original.id) != original.name || lr.getProperty('layerKind', original.id) != original.kind)
-                throw new Error('Исходные группы/слои не восстановились. Раскладка остановлена.');
-        }
-        prepareLayoutSources();
-        var map = {}, fresh = collectLayoutItems(sourceState.layerIds);
-        if (fresh.length != preparedAnalysisItems.length) throw new Error('Количество подготовленных объектов изменилось.');
-        for (i = 0; i < fresh.length; i++) {
-            var old = preparedAnalysisItems[i], next = fresh[i];
-            if (next.name != old.name || Math.abs(next.width - old.width) > .05 || Math.abs(next.height - old.height) > .05 ||
-                Math.abs(next.left - old.left) > .05 || Math.abs(next.top - old.top) > .05)
-                throw new Error('Повторная подготовка изменила объект "' + old.name + '". Изменения отменены.');
-            map[String(old.id)] = next.id;
-        }
-        for (i = 0; i < layoutPlan.placements.length; i++) {
-            var placement = layoutPlan.placements[i], replacement = map[String(placement.layerId)];
-            if (replacement == undefined) throw new Error('Потеряно соответствие подготовленных объектов.');
-            placement.layerId = replacement;
-        }
-        for (i = 0; i < preparedAnalysisItems.length; i++) {
-            preparedAnalysisItems[i].id = fresh[i].id;
-            preparedAnalysisItems[i].itemIndex = fresh[i].itemIndex;
-        }
-        validateLayoutPlan(layoutPlan, selectionGeometry);
-        validateSourceLayersBeforeApply();
+    var preparedMap = null;
+    runLayoutProgressStage('Восстановление исходных объектов', function () {
+        preparedMap = buildPreparedOriginalMap();
+        validateOriginalPreparationUnits(preparedMap);
+        // The temporary proxy IDs disappeared when main() restored the original
+        // History state. From this point the public selection state refers only
+        // to the user's original layers/groups again.
+        sourceState.layerIds = sourceState.originalLayerIds.slice(0);
+        sourceState.activeLayerId = sourceState.originalActiveLayerId;
+        layoutUnitProgress(1, 1, 'Исходные группы и связи восстановлены');
     });
-    applyLayoutPlan();
+    applyPreparedLayoutPlan(preparedMap);
+}
+
+function buildPreparedOriginalMap() {
+    if (!inputPreparation || !preparedAnalysisItems || inputPreparation.units.length != preparedAnalysisItems.length)
+        throw new Error('Потеряно соответствие временных объектов исходным группам.');
+
+    var byProxyId = {}, placementByProxyId = {}, i;
+    for (i = 0; i < layoutPlan.placements.length; i++)
+        placementByProxyId[String(layoutPlan.placements[i].layerId)] = layoutPlan.placements[i];
+
+    for (i = 0; i < inputPreparation.units.length; i++) {
+        var unit = inputPreparation.units[i], proxy = preparedAnalysisItems[i], roots = [], r;
+        if (!proxy || placementByProxyId[String(proxy.id)] == undefined)
+            throw new Error('Потеряно соответствие позиции объекту "' + (unit.name || '') + '".');
+        for (r = 0; r < unit.roots.length; r++) roots.push(unit.roots[r].id);
+        byProxyId[String(proxy.id)] = {
+            unit: unit,
+            roots: roots,
+            proxy: proxy,
+            placement: placementByProxyId[String(proxy.id)],
+            scaledProxyLeft: NaN,
+            scaledProxyTop: NaN
+        };
+    }
+    return byProxyId;
+}
+
+function validateOriginalPreparationUnits(preparedMap) {
+    var usedRoots = {}, mapped = 0, proxyKey, i, r;
+    for (proxyKey in preparedMap) if (preparedMap.hasOwnProperty(proxyKey)) {
+        mapped++;
+        var entry = preparedMap[proxyKey];
+        if (!entry.roots.length) throw new Error('У подготовленного объекта отсутствуют исходные слои.');
+        for (r = 0; r < entry.unit.roots.length; r++) {
+            var original = entry.unit.roots[r], key = String(original.id), d = lr.getDescriptor(original.id, false);
+            if (!d) throw new Error('Исходный слой "' + original.name + '" не восстановился.');
+            var current = readPreparationLayer(d, original.itemIndex);
+            if (!current || current.section == 'layerSectionEnd' || current.name != original.name || current.kind != original.kind)
+                throw new Error('Исходная группа/слой "' + original.name + '" восстановилась в другом состоянии. Раскладка остановлена.');
+            if (usedRoots[key]) throw new Error('Один исходный слой попал сразу в несколько объектов раскладки.');
+            usedRoots[key] = true;
+        }
+    }
+    if (mapped != inputPreparation.units.length || mapped != layoutPlan.placements.length)
+        throw new Error('Количество исходных объектов не совпадает с рассчитанной раскладкой.');
+}
+
+function getPreparedUnitTransformBounds(rootIds) {
+    var result = null;
+    for (var i = 0; i < rootIds.length; i++) {
+        var property = lr.getProperty('boundsNoEffects', rootIds[i]);
+        if (!property || !property.value) throw new Error('Не удалось получить границы исходной группы/слоя.');
+        var b = lr.descToObject(property.value), left = Number(b.left), top = Number(b.top), right = Number(b.right), bottom = Number(b.bottom);
+        if (!isFinite(left) || !isFinite(top) || !isFinite(right) || !isFinite(bottom) || right <= left || bottom <= top)
+            throw new Error('Исходная группа/слой имеет некорректные границы трансформации.');
+        if (!result) result = { left: left, top: top, right: right, bottom: bottom };
+        else {
+            if (left < result.left) result.left = left;
+            if (top < result.top) result.top = top;
+            if (right > result.right) result.right = right;
+            if (bottom > result.bottom) result.bottom = bottom;
+        }
+    }
+    result.centerX = (result.left + result.right) / 2;
+    result.centerY = (result.top + result.bottom) / 2;
+    return result;
+}
+
+function applyPreparedLayoutPlan(preparedMap) {
+    if (!preparedMap) throw new Error('Нет соответствия исходным группам.');
+    var scale = layoutPlan.commonScale, total = layoutPlan.placements.length, i;
+    if (!isFinite(scale) || scale <= 0) throw new Error('Некорректный общий масштаб.');
+
+    // Derive one affine transform per original layout-unit. The temporary proxy
+    // defines the visual bbox, while QCSAverage uses the native root-set bbox as
+    // the transform centre. The offset below compensates that difference exactly.
+    runLayoutProgressStage('Расчёт трансформаций объектов', function () {
+        for (i = 0; i < total; i++) {
+            var p = layoutPlan.placements[i], entry = preparedMap[String(p.layerId)];
+            if (!entry) throw new Error('Не найден исходный объект для "' + p.name + '".');
+            layoutUnitProgress(i, total, i + '/' + total);
+            lr.selectLayers(entry.roots);
+            var transformBounds = getPreparedUnitTransformBounds(entry.roots),
+                cx = transformBounds.centerX, cy = transformBounds.centerY,
+                scaledProxyLeft = cx + (entry.proxy.left - cx) * scale,
+                scaledProxyTop = cy + (entry.proxy.top - cy) * scale;
+            entry.transformOffsetX = p.left - scaledProxyLeft;
+            entry.transformOffsetY = p.top - scaledProxyTop;
+            if (!isFinite(entry.transformOffsetX) || !isFinite(entry.transformOffsetY))
+                throw new Error('Не удалось рассчитать трансформацию исходного объекта "' + p.name + '".');
+            layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
+        }
+    });
+
+    runLayoutProgressStage('Трансформация исходных объектов', function () {
+        for (i = 0; i < total; i++) {
+            var p = layoutPlan.placements[i], entry = preparedMap[String(p.layerId)];
+            layoutUnitProgress(i, total, i + '/' + total);
+            lr.selectLayers(entry.roots);
+            if (Math.abs(scale - 1) > 0.0000001 || Math.abs(entry.transformOffsetX) > 0.0001 || Math.abs(entry.transformOffsetY) > 0.0001)
+                lr.transformSelection(scale * 100, entry.transformOffsetX, entry.transformOffsetY);
+            layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
+        }
+    });
+
+    if (cfg.groupRows) runLayoutProgressStage('Группировка рядов', function () { groupLayoutRows(layoutPlan.rows, preparedMap); });
+}
+
+function readLayoutLayerDescriptor(d, fallbackId, order) {
+    function has(key) { return d.hasKey(s2t(key)); }
+    function numberFrom(desc, key) {
+        if (!desc || !desc.hasKey(s2t(key))) return NaN;
+        var type = desc.getType(s2t(key));
+        if (type == DescValueType.UNITDOUBLE) return Number(desc.getUnitDoubleValue(s2t(key)));
+        if (type == DescValueType.DOUBLETYPE) return Number(desc.getDouble(s2t(key)));
+        if (type == DescValueType.INTEGERTYPE) return Number(desc.getInteger(s2t(key)));
+        return NaN;
+    }
+
+    if (!d) throw new Error('Один из выбранных слоёв недоступен.');
+    var id = has('layerID') ? d.getInteger(s2t('layerID')) : fallbackId,
+        name = has('name') ? d.getString(s2t('name')) : '',
+        kind = has('layerKind') ? d.getInteger(s2t('layerKind')) : 7,
+        background = has('background') && d.getBoolean(s2t('background')),
+        locking = has('layerLocking') ? lr.descToObject(d.getObjectValue(s2t('layerLocking'))) : null,
+        itemIndex = has('itemIndex') ? d.getInteger(s2t('itemIndex')) : NaN,
+        boundsDesc = has('boundsNoEffects') ? d.getObjectValue(s2t('boundsNoEffects')) : null;
+
+    if (kind != 1 && kind != 4 && kind != 5)
+        throw new Error('Слой "' + name + '" имеет неподдерживаемый тип. Используются пиксельные слои, векторные shape-слои и Smart Object.');
+    if (background)
+        throw new Error('Фоновый слой "' + name + '" нельзя перемещать. Сначала преобразуйте его в обычный слой.');
+    if (locking && (locking.protectAll || locking.protectPosition || locking.protectComposite))
+        throw new Error('Слой "' + name + '" заблокирован для перемещения или трансформации.');
+    if (!boundsDesc)
+        throw new Error('Не удалось получить boundsNoEffects слоя "' + name + '".');
+    if (!isFinite(itemIndex))
+        throw new Error('Не удалось получить позицию слоя "' + name + '" в палитре слоёв.');
+
+    var bounds = {
+        left: numberFrom(boundsDesc, 'left'),
+        top: numberFrom(boundsDesc, 'top'),
+        right: numberFrom(boundsDesc, 'right'),
+        bottom: numberFrom(boundsDesc, 'bottom')
+    };
+    bounds.width = bounds.right - bounds.left;
+    bounds.height = bounds.bottom - bounds.top;
+    bounds.centerX = bounds.left + bounds.width / 2;
+    bounds.centerY = bounds.top + bounds.height / 2;
+    if (!isFinite(bounds.width) || !isFinite(bounds.height) || bounds.width <= 0 || bounds.height <= 0)
+        throw new Error('Слой "' + name + '" имеет некорректный bounding box.');
+
+    return {
+        id: id, name: name, kind: kind, order: order, itemIndex: itemIndex,
+        left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom,
+        width: bounds.width, height: bounds.height, centerX: bounds.centerX, centerY: bounds.centerY
+    };
 }
 
 function collectLayoutItems(ids) {
-    var output = [],
-        count = ids.length;
+    var output = [], count = ids.length, cache = selectedLayerDescriptorCache;
+    // The cached descriptors are snapshots and are valid only before any input
+    // preparation. Consume the cache once so it cannot leak into later stages.
+    selectedLayerDescriptorCache = null;
 
     for (var i = 0; i < count; i++) {
-        var id = ids[i],
-            name = lr.getProperty('name', id);
-
-        progress(8 + 22 * (i / Math.max(1, count)), 'Слои ' + i + '/' + count)
-
-        var kind = lr.getProperty('layerKind', id),
-            background = lr.getProperty('background', id),
-            locking = lr.getProperty('layerLocking', id),
-            boundsProperty = lr.getProperty('boundsNoEffects', id);
-
-        if (kind != 1 && kind != 4 && kind != 5)
-            throw new Error('Слой "' + name + '" имеет неподдерживаемый тип. Используются пиксельные слои, векторные shape-слои и Smart Object.')
-
-        if (background)
-            throw new Error('Фоновый слой "' + name + '" нельзя перемещать. Сначала преобразуйте его в обычный слой.')
-
-        if (locking && locking.value) {
-            var locked = lr.descToObject(locking.value);
-            if (locked.protectAll || locked.protectPosition || locked.protectComposite)
-                throw new Error('Слой "' + name + '" заблокирован для перемещения или трансформации.')
-        }
-
-        if (!boundsProperty || !boundsProperty.value)
-            throw new Error('Не удалось получить boundsNoEffects слоя "' + name + '".')
-
-        var b = lr.descToObject(boundsProperty.value),
-            bounds = {
-                left: Number(b.left),
-                top: Number(b.top),
-                right: Number(b.right),
-                bottom: Number(b.bottom)
-            };
-
-        bounds.width = bounds.right - bounds.left
-        bounds.height = bounds.bottom - bounds.top
-        bounds.centerX = bounds.left + bounds.width / 2
-        bounds.centerY = bounds.top + bounds.height / 2
-
-        if (!isFinite(bounds.width) || !isFinite(bounds.height) || bounds.width <= 0 || bounds.height <= 0)
-            throw new Error('Слой "' + name + '" имеет некорректный bounding box.')
-
-        output.push({
-            id: id,
-            name: name,
-            order: i,
-            itemIndex: lr.getProperty('itemIndex', id),
-            left: bounds.left,
-            top: bounds.top,
-            right: bounds.right,
-            bottom: bounds.bottom,
-            width: bounds.width,
-            height: bounds.height,
-            centerX: bounds.centerX,
-            centerY: bounds.centerY
-        })
-
-        progress(8 + 22 * ((i + 1) / Math.max(1, count)), 'Слои ' + (i + 1) + '/' + count)
+        var id = ids[i];
+        progress(8 + 22 * (i / Math.max(1, count)), 'Слои ' + i + '/' + count);
+        var d = cache && cache[String(id)] ? cache[String(id)] : lr.getDescriptor(id, false);
+        output.push(readLayoutLayerDescriptor(d, id, i));
+        progress(8 + 22 * ((i + 1) / Math.max(1, count)), 'Слои ' + (i + 1) + '/' + count);
     }
-
-    return output
+    return output;
 }
 
 
@@ -1956,9 +2082,11 @@ function analyzeSemantics(items) {
         items[i].headLean = 0;
         items[i].headLeanWeight = 0;
     }
+    var hasPhotoCapableLayer = false;
+    for (i = 0; i < items.length; i++) if (items[i].kind != 4) { hasPhotoCapableLayer = true; break; }
     var genderReady = cfg.alternateGender && pythonFeatures.ensureReady(),
-        headReady = cfg.considerHeadTurn && headTurnFeatures.ensureReady(),
-        colorReady = colorRequested && colorFeatures.ensureReady(),
+        headReady = cfg.considerHeadTurn && hasPhotoCapableLayer && headTurnFeatures.ensureReady(),
+        colorReady = colorRequested && hasPhotoCapableLayer && colorFeatures.ensureReady(),
         byId = {}, payload = [], result;
     if (genderReady) {
         for (i = 0; i < items.length; i++) payload.push({ id: items[i].id, name: items[i].name });
@@ -1972,9 +2100,11 @@ function analyzeSemantics(items) {
         for (i = 0; i < items.length; i++) applyGenderResult(items[i], byId[String(items[i].id)]);
     }
     setLayoutProgressRange(.1, .9); // Reserve initialization/name analysis before the per-photo slices.
-    var photoItems = [];
+    var photoItems = [], previewHistoryTouched = false;
     for (i = 0; i < items.length; i++)
-        if (colorReady || headReady || (genderReady && items[i].gender == 'U')) photoItems.push(items[i]);
+        // Native vector shape layers are layout objects, not photographs. Their
+        // names may still resolve gender, but JPEG/vision analysis is skipped.
+        if (items[i].kind != 4 && (colorReady || headReady || (genderReady && items[i].gender == 'U'))) photoItems.push(items[i]);
     if (photoItems.length) {
         var parentDocumentId = doc.getProperty('documentID'),
             analysisBaseHistory = activeDocument.activeHistoryState,
@@ -1991,6 +2121,7 @@ function analyzeSemantics(items) {
                 progress(30 + 2 * i / Math.max(1, photoItems.length), 'Фото ' + i + '/' + photoItems.length);
                 var previewPath = null;
                 try {
+                    previewHistoryTouched = true;
                     previewPath = createGenderPreview(target, parentDocumentId, analysisAnchorHistory);
                     beginPythonProgressWait(1 / Math.max(1, photoItems.length), 4000);
                     var driver = wantGender ? pythonFeatures : wantHead ? headTurnFeatures : colorFeatures,
@@ -2094,7 +2225,8 @@ function analyzeSemantics(items) {
     return {
         gender: cfg.alternateGender ? finalizeGenderSummary(items, !genderReady || pythonFeatures.isDisabled()) : null,
         headTurn: cfg.considerHeadTurn ? finalizeHeadTurnSummary(items, !headReady || headTurnFeatures.isDisabled()) : null,
-        color: colorRequested ? finalizeColorSummary(items, !colorReady || colorFeatures.isDisabled()) : null
+        color: colorRequested ? finalizeColorSummary(items, !colorReady || colorFeatures.isDisabled()) : null,
+        previewHistoryTouched: previewHistoryTouched
     };
 }
 
@@ -2172,39 +2304,61 @@ function paletteTone(palette) {
 function colorAssignmentCost(plan, mode, distances) {
     mode = normalizeColorMode(mode);
     distances = distances || {};
-    // Fixed positional neighbour graph: horizontal row neighbours and nearest
-    // portrait in the next physical row. Coordinates include all selection zones.
-    var entries = [], edges = {}, total = 0, weights = 0, positions = {};
+    // Build a fixed positional neighbour graph from actual physical rows:
+    // adjacent portraits in the same physical row and the nearest portrait only
+    // in the immediately following physical row. Rows from separate zones that
+    // share the same Y coordinate belong to one physical row.
+    var positions = {}, physicalRows = [], rowRefs = [], total = 0, weights = 0, edges = {};
     for (var pi = 0; pi < plan.placements.length; pi++) positions[String(plan.placements[pi].layerId)] = plan.placements[pi];
-    for (var r = 0; r < plan.rows.length; r++) for (var c = 0; c < plan.rows[r].items.length; c++) {
-        var item = plan.rows[r].items[c], placement = positions[String(item.id)];
-        if (placement) entries.push({ item: item, x: placement.targetCenterX, y: placement.targetCenterY, top: plan.rows[r].y, row: r });
+    for (var r = 0; r < plan.rows.length; r++) rowRefs.push({ index: r, top: Number(plan.rows[r].y) });
+    rowRefs.sort(function (a, b) { return a.top == b.top ? a.index - b.index : a.top - b.top; });
+
+    for (var rr = 0; rr < rowRefs.length; rr++) {
+        var ref = rowRefs[rr], group = null;
+        if (physicalRows.length && Math.abs(physicalRows[physicalRows.length - 1].top - ref.top) < 1)
+            group = physicalRows[physicalRows.length - 1];
+        else {
+            group = { top: ref.top, entries: [] };
+            physicalRows.push(group);
+        }
+        var row = plan.rows[ref.index];
+        for (var c = 0; c < row.items.length; c++) {
+            var item = row.items[c], placement = positions[String(item.id)];
+            if (placement) group.entries.push({ item: item, x: placement.targetCenterX, y: placement.targetCenterY });
+        }
     }
-    function edge(i, j, weight) {
-        var key = Math.min(i, j) + ':' + Math.max(i, j);
-        if (edges[key] || !entries[i].item.colorPalette || !entries[j].item.colorPalette) return;
-        edges[key] = true;
-        var a = entries[i].item.id, b = entries[j].item.id, pair = Math.min(a, b) + ':' + Math.max(a, b);
-        if (distances[pair] == undefined) distances[pair] = paletteDistance(entries[i].item.colorPalette, entries[j].item.colorPalette);
+    for (rr = 0; rr < physicalRows.length; rr++)
+        physicalRows[rr].entries.sort(function (a, b) { return a.x == b.x ? a.item.order - b.item.order : a.x - b.x; });
+
+    function edge(a, b, weight) {
+        if (!a || !b || !a.item.colorPalette || !b.item.colorPalette) return;
+        var edgeKey = Math.min(a.item.id, b.item.id) + ':' + Math.max(a.item.id, b.item.id);
+        if (edges[edgeKey]) return;
+        edges[edgeKey] = true;
+        var pair = edgeKey;
+        if (distances[pair] == undefined) distances[pair] = paletteDistance(a.item.colorPalette, b.item.colorPalette);
         total += weight * distances[pair];
         weights += weight;
     }
-    for (var i = 0; i < entries.length; i++) {
-        var right = -1, below = -1, rightDist = Infinity, belowDist = Infinity;
-        for (var j = 0; j < entries.length; j++) {
-            if (i == j) continue;
-            var dx = entries[j].x - entries[i].x, dy = entries[j].y - entries[i].y;
-            if (Math.abs(entries[j].top - entries[i].top) < 1 && dx > 0 && dx < rightDist) { right = j; rightDist = dx; }
-            if (entries[j].top > entries[i].top + 1 && dy > 1) {
-                var d = Math.sqrt(dx * dx + dy * dy);
-                if (d < belowDist) { below = j; belowDist = d; }
+
+    for (rr = 0; rr < physicalRows.length; rr++) {
+        var current = physicalRows[rr].entries;
+        for (var i = 0; i + 1 < current.length; i++) edge(current[i], current[i + 1], 1);
+        if (rr + 1 >= physicalRows.length) continue;
+        var below = physicalRows[rr + 1].entries;
+        for (i = 0; i < current.length; i++) {
+            var nearest = null, nearestDist = Infinity;
+            for (var j = 0; j < below.length; j++) {
+                var dx = below[j].x - current[i].x, dy = below[j].y - current[i].y,
+                    d = dx * dx + dy * dy;
+                if (d < nearestDist) { nearest = below[j]; nearestDist = d; }
             }
+            if (nearest) edge(current[i], nearest, .5);
         }
-        if (right >= 0) edge(i, right, 1);
-        if (below >= 0) edge(i, below, .5);
     }
     return (mode == 'contrast' ? -1 : 1) * (weights ? total / weights : 0);
 }
+
 
 function betterColorOrder(plan, cost, best, bestCost, mode) {
     return cost < bestCost - 1e-8;
@@ -2212,19 +2366,26 @@ function betterColorOrder(plan, cost, best, bestCost, mode) {
 
 // Compare every trial with the original semantic result, never the last swap:
 // this prevents successive small concessions from accumulating into large turns.
-function colorPoseCompatible(candidate, baseline, geometry) {
-    var positions = {}, photos = {}, center = (geometry.bounds.left + geometry.bounds.right) / 2;
-    for (var i = 0; i < baseline.placements.length; i++)
+function buildColorPoseContext(baseline, geometry) {
+    var positions = {}, photos = {}, i, r, c;
+    for (i = 0; i < baseline.placements.length; i++)
         positions[String(baseline.placements[i].layerId)] = baseline.placements[i].targetCenterX;
+    for (r = 0; r < baseline.rows.length; r++) for (c = 0; c < baseline.rows[r].items.length; c++)
+        photos[String(baseline.rows[r].items[c].id)] = baseline.rows[r].items[c];
+    return { positions: positions, photos: photos, center: (geometry.bounds.left + geometry.bounds.right) / 2 };
+}
+
+function colorPoseCompatible(candidate, baseline, geometry, context) {
+    context = context || buildColorPoseContext(baseline, geometry);
+    var positions = context.positions, photos = context.photos, center = context.center;
     for (var r = 0; r < candidate.rows.length; r++) for (var c = 0; c < candidate.rows[r].items.length; c++) {
         var item = candidate.rows[r].items[c], original = baseline.rows[r].items[c];
-        photos[String(item.id)] = item;
         if (!!item.headTurnValid != !!original.headTurnValid) return false;
         if (item.headTurnValid && Math.abs(item.headTurn - original.headTurn) > 12) return false;
         if (!!item.headLeanValid != !!original.headLeanValid) return false;
         if (item.headLeanValid && Math.abs(item.headLean - original.headLean) > 8) return false;
     }
-    for (i = 0; i < candidate.placements.length; i++) {
+    for (var i = 0; i < candidate.placements.length; i++) {
         var placement = candidate.placements[i], photo = photos[String(placement.layerId)];
         if (photo && photo.headTurnValid && Math.abs(photo.headTurn) >= 12 &&
             photo.headTurn * (center - positions[String(photo.id)]) >= 0 &&
@@ -2241,8 +2402,14 @@ function colorSemanticsCompatible(score, baseline) {
 
 function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
     mode = normalizeColorMode(mode);
-    var distances = {}, best = plan, baseline = getSemanticAssignmentScore(plan, geometry, useGender, useHead),
-        bestCost = colorAssignmentCost(plan, mode, distances), initialCost = bestCost, slots = [];
+    var distances = {}, tones = {}, best = plan, baseline = getSemanticAssignmentScore(plan, geometry, useGender, useHead),
+        bestCost = colorAssignmentCost(plan, mode, distances), initialCost = bestCost, slots = [],
+        poseContext = useHead ? buildColorPoseContext(plan, geometry) : null;
+    function cachedTone(item) {
+        var key = String(item.id);
+        if (!tones[key]) tones[key] = paletteTone(item.colorPalette);
+        return tones[key];
+    }
     for (var r = 0; r < plan.rows.length; r++) for (var c = 0; c < plan.rows[r].items.length; c++) slots.push({ row: r, col: c });
     if (mode == 'harmonious') {
         // Global seed makes color-only behaviour visible even when pairwise
@@ -2260,7 +2427,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
         }
         for (var bk in pools) if (pools.hasOwnProperty(bk)) {
             pools[bk].sort(function (a, b) {
-                var ta = paletteTone(a.colorPalette), tb = paletteTone(b.colorPalette),
+                var ta = cachedTone(a), tb = cachedTone(b),
                     va = ta.lightness, vb = tb.lightness;
                 if (Math.abs(va - vb) > 1e-8) return vb - va;
                 if (Math.abs(ta.hue - tb.hue) > 1e-8) return ta.hue - tb.hue;
@@ -2274,7 +2441,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
         if (seeded) {
             var seedScore = getSemanticAssignmentScore(seeded, geometry, useGender, useHead), seedCost = colorAssignmentCost(seeded, mode, distances);
             if (colorSemanticsCompatible(seedScore, baseline) &&
-                (!useHead || colorPoseCompatible(seeded, plan, geometry)) && betterColorOrder(seeded, seedCost, best, bestCost, mode)) {
+                (!useHead || colorPoseCompatible(seeded, plan, geometry, poseContext)) && betterColorOrder(seeded, seedCost, best, bestCost, mode)) {
                 best = seeded; bestCost = seedCost;
             }
         }
@@ -2303,7 +2470,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
             if (!candidate) continue;
             var score = getSemanticAssignmentScore(candidate, geometry, useGender, useHead);
             if (!colorSemanticsCompatible(score, baseline) ||
-                (useHead && !colorPoseCompatible(candidate, plan, geometry))) continue;
+                (useHead && !colorPoseCompatible(candidate, plan, geometry, poseContext))) continue;
             var cost = colorAssignmentCost(candidate, mode, distances);
             if (betterColorOrder(candidate, cost, best, bestCost, mode)) { best = candidate; bestCost = cost; changed = true; }
         }
@@ -2506,14 +2673,23 @@ function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
 function refreshLayoutLayerReferences(items) {
     if (!items || !items.length) return;
 
+    function readIdentity(id) {
+        var d = lr.getDescriptor(id, false);
+        if (!d) return null;
+        function has(key) { return d.hasKey(s2t(key)); }
+        return {
+            id: has('layerID') ? d.getInteger(s2t('layerID')) : id,
+            name: has('name') ? d.getString(s2t('name')) : null,
+            itemIndex: has('itemIndex') ? d.getInteger(s2t('itemIndex')) : null
+        };
+    }
+
     var oldToNew = {}, refreshedIds = [], i;
     for (i = 0; i < items.length; i++) {
-        var item = items[i],
-            oldId = item.id,
-            currentName = lr.getProperty('name', oldId),
-            currentIndex = lr.getProperty('itemIndex', oldId),
-            valid = currentName !== false && currentIndex !== false &&
-                String(currentName) == String(item.name) && Number(currentIndex) == Number(item.itemIndex),
+        var item = items[i], oldId = item.id,
+            current = readIdentity(oldId),
+            valid = current && current.name !== null && current.itemIndex !== null &&
+                String(current.name) == String(item.name) && Number(current.itemIndex) == Number(item.itemIndex),
             resolvedId = oldId;
 
         if (!valid) {
@@ -2521,12 +2697,10 @@ function refreshLayoutLayerReferences(items) {
             if (resolvedId === false || resolvedId == undefined)
                 throw new Error('После подготовки превью Photoshop потерял ссылку на слой "' + item.name + '".');
 
-            var resolvedName = lr.getProperty('name', resolvedId),
-                resolvedIndex = lr.getProperty('itemIndex', resolvedId);
-            if (resolvedName === false || resolvedIndex === false ||
-                String(resolvedName) != String(item.name) || Number(resolvedIndex) != Number(item.itemIndex))
+            var resolved = readIdentity(resolvedId);
+            if (!resolved || resolved.name === null || resolved.itemIndex === null ||
+                String(resolved.name) != String(item.name) || Number(resolved.itemIndex) != Number(item.itemIndex))
                 throw new Error('После подготовки превью не удалось безопасно восстановить слой "' + item.name + '".');
-
             item.id = resolvedId;
         }
 
@@ -2540,6 +2714,7 @@ function refreshLayoutLayerReferences(items) {
         if (oldToNew[activeKey] != undefined) sourceState.activeLayerId = oldToNew[activeKey];
     }
 }
+
 
 function validateSourceLayersBeforeApply() {
     if (!sourceState || !sourceState.layerIds || !sourceState.layerIds.length)
@@ -2716,9 +2891,10 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
     }
     function consider(rows) {
         var candidate = rebuildAssignedLayout(plan, geometry, rows, true);
-        if (!candidate) return;
+        if (!candidate) return null;
         var score = getSemanticAssignmentScore(candidate, geometry, useGender, useHead);
         if (betterSemanticAssignment(score, roundScore, useHead)) { roundBest = candidate; roundScore = score; }
+        return candidate;
     }
     function sortedEqualSizeRows(p) {
         var rows = copyRows(p), buckets = {}, position = {}, rr, cc;
@@ -2744,11 +2920,22 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
         }
         return rows;
     }
+    function rowWidthFits(rowIndex, rawWidth) {
+        var original = plan.rows[rowIndex], available = original.availableInterval.right - original.availableInterval.left;
+        return rawWidth * plan.commonScale + original.gapX * Math.max(0, original.items.length - 1) <= available + 1e-7;
+    }
     // Multi-pass whole-plan refinement: all same-sex cross-row exchanges, and
     // alternative row patterns with equal counts, are assessed after real reflow.
+    // Reuse candidates that were already rebuilt for the immediate head-order
+    // follow-up instead of rebuilding the same assignment twice.
     for (var pass = 0; pass < 12; pass++) {
         layoutUnitProgress(pass, 12, 'М/Д и поза: проход ' + (pass + 1) + ' из максимум 12');
-        var roundBest = best, roundScore = bestScore, baseRows = copyRows(best);
+        var roundBest = best, roundScore = bestScore, baseRows = copyRows(best), rowWidths = [];
+        for (r = 0; r < baseRows.length; r++) {
+            var rawWidth = 0;
+            for (c = 0; c < baseRows[r].length; c++) rawWidth += baseRows[r][c].width;
+            rowWidths[r] = rawWidth;
+        }
         if (useGender) {
             var allItems = [];
             for (var gr = 0; gr < baseRows.length; gr++) allItems = allItems.concat(baseRows[gr]);
@@ -2757,11 +2944,8 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
                 globalRows.push(globalOrder.slice(offset, offset + plan.distribution[gr]));
                 offset += plan.distribution[gr];
             }
-            consider(globalRows);
-            if (useHead) {
-                var globalTrial = rebuildAssignedLayout(plan, geometry, globalRows, true);
-                if (globalTrial) consider(sortedEqualSizeRows(globalTrial));
-            }
+            var globalTrial = consider(globalRows);
+            if (useHead && globalTrial) consider(sortedEqualSizeRows(globalTrial));
         }
         if (useHead) consider(sortedEqualSizeRows(best));
         for (r = 0; useGender && r < baseRows.length; r++) {
@@ -2780,11 +2964,8 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
                     var sex = typeof variant[c] == 'string' ? variant[c] : variant[c].gender;
                     rows[r][c] = pools[sex][counters[sex]++];
                 }
-                consider(rows);
-                if (useHead) {
-                    var trial = rebuildAssignedLayout(plan, geometry, rows, true);
-                    if (trial) consider(sortedEqualSizeRows(trial));
-                }
+                var trial = consider(rows);
+                if (useHead && trial) consider(sortedEqualSizeRows(trial));
             }
         }
         var searchSlots = slots;
@@ -2813,6 +2994,14 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
                     poseChange = useHead && ai.headTurnValid && bi.headTurnValid && (ai.headTurn != bi.headTurn ||
                         (ai.headLeanValid ? ai.headLeanWeight * ai.headLean : 0) != (bi.headLeanValid ? bi.headLeanWeight * bi.headLean : 0));
                 if (!genderChange && !poseChange) continue;
+                // Fast reject is exactly the first horizontal-fit condition used
+                // by rebuildAssignedLayout; it only skips candidates that would
+                // be rejected there anyway.
+                if (sa.row != sb.row) {
+                    var widthA = rowWidths[sa.row] - ai.width + bi.width,
+                        widthB = rowWidths[sb.row] - bi.width + ai.width;
+                    if (!rowWidthFits(sa.row, widthA) || !rowWidthFits(sb.row, widthB)) continue;
+                }
                 // Gender repair does not depend on pose availability. Counts
                 // may move between rows; only total M/F/U counts are invariant.
                 var rows = copyRows(best);
@@ -2830,10 +3019,7 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
         for (var property in plan) if (plan.hasOwnProperty(property)) unchanged[property] = plan[property];
         best = unchanged;
     }
-    if (useGender) {
-        best.genderCheckerboard = getGenderCheckerboardStats(best);
-
-    }
+    if (useGender) best.genderCheckerboard = getGenderCheckerboardStats(best);
     if (useHead) best.headTurnOrdering = { centerX: (geometry.bounds.left + geometry.bounds.right) / 2,
         initialCost: initial.head, finalCost: bestScore.head, smoothCost: bestScore.smoothCost, passes: pass };
     best.semanticAssignment = bestScore;
@@ -5015,9 +5201,14 @@ function applyLayoutPlan() {
     if (!ids.length) throw new Error('Не удалось получить исходный набор слоёв для общей трансформации.')
 
     runLayoutProgressStage('Общий масштаб слоёв', function () {
-        if (!arraysEqual(getSelectedLayerIds(), ids)) lr.selectLayers(ids);
-        if (!arraysEqual(getSelectedLayerIds(), ids))
-            throw new Error('Photoshop не смог восстановить исходный набор слоёв перед общей трансформацией.');
+        // For Transform only the selected set matters, not its palette-order
+        // representation. Check targetLayersIDs directly: one document query,
+        // no per-layer descriptors.
+        if (!selectedLayerSetMatches(ids)) {
+            lr.selectLayers(ids);
+            if (!selectedLayerSetMatches(ids))
+                throw new Error('Photoshop не смог восстановить исходный набор слоёв перед общей трансформацией.');
+        }
         if (Math.abs(scale - 1) > 0.0000001) lr.transformSelection(scale * 100);
     });
     runLayoutProgressStage('Позиционирование фотографий', function () {
@@ -5040,12 +5231,19 @@ function applyLayoutPlan() {
     if (cfg.groupRows) runLayoutProgressStage('Группировка рядов', function () { groupLayoutRows(layoutPlan.rows); });
 }
 
-function groupLayoutRows(rows) {
+function groupLayoutRows(rows, preparedMap) {
     for (var r = rows.length - 1; r >= 0; r--) {
         layoutUnitProgress(rows.length - r - 1, rows.length, (rows.length - r - 1) + '/' + rows.length + ' — Ряд ' + (r + 1));
 
-        var ids = [];
-        for (var i = 0; i < rows[r].items.length; i++) ids.push(rows[r].items[i].id)
+        var ids = [], seen = {};
+        for (var i = 0; i < rows[r].items.length; i++) {
+            var itemId = rows[r].items[i].id, entry = preparedMap ? preparedMap[String(itemId)] : null,
+                roots = entry ? entry.roots : [itemId];
+            for (var q = 0; q < roots.length; q++) if (!seen[String(roots[q])]) {
+                seen[String(roots[q])] = true;
+                ids.push(roots[q]);
+            }
+        }
         if (!ids.length) continue;
 
         lr.selectLayers(ids)
@@ -5063,6 +5261,24 @@ function restoreLayerSelection(ids, activeId) {
     }
     if (arrayContains(ids, activeId)) ordered.push(activeId)
     lr.selectLayers(ordered.length ? ordered : ids)
+}
+
+function shouldCollapseAllGroupsAfterLayout() {
+    if (cfg && cfg.groupRows) return true;
+    if (!inputPreparation || !inputPreparation.units) return false;
+    for (var i = 0; i < inputPreparation.units.length; i++) {
+        var roots = inputPreparation.units[i].roots || [];
+        for (var r = 0; r < roots.length; r++)
+            if (roots[r] && roots[r].section == 'layerSectionStart') return true;
+    }
+    return false;
+}
+
+function collapseAllLayerGroups() {
+    try {
+        if (typeof app != 'undefined' && typeof app.runMenuItem == 'function')
+            app.runMenuItem(s2t('collapseAllGroupsEvent'));
+    } catch (e) {}
 }
 
 function near(a, b, eps) {
@@ -5692,12 +5908,14 @@ function AM(target, order) {
         executeAction(s2t('make'), d, DialogModes.NO);
     };
 
-    this.transformSelection = function (scale) {
+    this.transformSelection = function (scale, offsetX, offsetY) {
         var d = new AD,
             d1 = new AD;
+        offsetX = isFinite(Number(offsetX)) ? Number(offsetX) : 0;
+        offsetY = isFinite(Number(offsetY)) ? Number(offsetY) : 0;
         d.putEnumerated(s2t('freeTransformCenterState'), s2t('quadCenterState'), s2t('QCSAverage'));
-        d1.putUnitDouble(s2t('horizontal'), s2t('pixelsUnit'), 0);
-        d1.putUnitDouble(s2t('vertical'), s2t('pixelsUnit'), 0);
+        d1.putUnitDouble(s2t('horizontal'), s2t('pixelsUnit'), offsetX);
+        d1.putUnitDouble(s2t('vertical'), s2t('pixelsUnit'), offsetY);
         d.putObject(s2t('offset'), s2t('offset'), d1);
         d.putUnitDouble(s2t('width'), s2t('percentUnit'), scale);
         d.putUnitDouble(s2t('height'), s2t('percentUnit'), scale);
