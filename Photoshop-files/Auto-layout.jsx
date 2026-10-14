@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.18 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.19 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -43,7 +43,7 @@
 
 $.localize = true;
 
-var ver = '0.10.18',
+var ver = '0.10.19',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -246,7 +246,7 @@ function readLockedActionProfile(d) {
             scale: Number(d.getDouble(app.stringIDToTypeID('lockedScale'))),
             gapY: Number(d.getDouble(app.stringIDToTypeID('lockedGapY'))),
             gapX: Number(d.getDouble(app.stringIDToTypeID('lockedGapX'))),
-            frames: decodeLockedFrames(String(d.getString(app.stringIDToTypeID('lockedFrames'))))
+            height: Number(d.getDouble(app.stringIDToTypeID('lockedHeight')))
         };
         validateLockedProfile(result);
         return result;
@@ -257,7 +257,7 @@ function validateLockedProfile(profile) {
     if (!profile || typeof profile.scale != 'number' || !isFinite(profile.scale) || profile.scale <= 0 ||
         typeof profile.gapY != 'number' || !isFinite(profile.gapY) || profile.gapY < 0 ||
         typeof profile.gapX != 'number' || !isFinite(profile.gapX) || profile.gapX < 0 ||
-        !validLockedFrames(profile.frames))
+        typeof profile.height != 'number' || !isFinite(profile.height) || profile.height <= 0)
         throw new Error(str.t('В экшене нет корректного масштаба и интервалов. Запишите шаг заново на готовой раскладке.', 'The action does not contain valid scale and gap values. Record the step again using a completed layout.'));
 }
 
@@ -286,69 +286,15 @@ function lockedLayoutActive() {
     return !!(cfg.lockForAction && typeof actionLayoutProfile != 'undefined' && actionLayoutProfile);
 }
 
-// Absolute frame-size classes, independent of layer IDs and photo count.
-// Plain numeric pairs avoid eval and JSON dependencies in ExtendScript.
-function validLockedFrames(frames) {
-    if (!frames || !frames.length || frames.length > 10000) return false;
-    for (var i = 0; i < frames.length; i++) {
-        var f = frames[i];
-        if (!f || f.length != 2 || typeof f[0] != 'number' || typeof f[1] != 'number' ||
-            !isFinite(f[0]) || !isFinite(f[1]) || f[0] <= 0 || f[1] <= 0) return false;
-    }
-    return true;
-}
-
-function decodeLockedFrames(text) {
-    var pairs = text.split(';'), frames = [];
-    if (pairs.length > 10000) return null;
-    for (var i = 0; i < pairs.length; i++) {
-        var pair = pairs[i].split(',');
-        if (pair.length != 2 || !pair[0] || !pair[1]) return null;
-        frames.push([Number(pair[0]), Number(pair[1])]);
-    }
-    return validLockedFrames(frames) ? frames : null;
-}
-
-function encodeLockedFrames(frames) {
-    var pairs = [];
-    for (var i = 0; i < frames.length; i++) pairs.push(frames[i][0] + ',' + frames[i][1]);
-    return pairs.join(';');
-}
-
-function matchesLockedFrame(width, height, frames, tolerance) {
-    var eps = tolerance == undefined ? 0.05 : tolerance;
-    for (var i = 0; i < frames.length; i++)
-        if (Math.abs(width - frames[i][0]) <= eps && Math.abs(height - frames[i][1]) <= eps) return true;
-    return false;
-}
-
+// Only fixed Actions normalize scale by the median object height.
+// A few protruding captions/decorations do not determine the whole-sheet scale.
+// This measures boundsNoEffects, not an inferred inner photographic frame.
 function resolveLockedScale(items, profile) {
-    var candidates = [profile.scale], best = null, bestError = 1e100, bestDistance = 1e100;
-    for (var f = 0; f < profile.frames.length; f++) {
-        var w = items[0].width, h = items[0].height, target = profile.frames[f];
-        candidates.push(target[0] / w);
-        candidates.push(target[1] / h);
-        candidates.push((target[0] * w + target[1] * h) / (w * w + h * h));
-    }
-    for (var c = 0; c < candidates.length; c++) {
-        var scale = candidates[c], valid = isFinite(scale) && scale > 0, error = 0;
-        for (var i = 0; valid && i < items.length; i++) {
-            var frameError = 1e100;
-            for (var f = 0; f < profile.frames.length; f++)
-                frameError = Math.min(frameError, Math.max(Math.abs(items[i].width * scale - profile.frames[f][0]),
-                    Math.abs(items[i].height * scale - profile.frames[f][1])));
-            valid = frameError <= 1.01; // Allow Photoshop's one-pixel raster-bound rounding.
-            error = Math.max(error, frameError);
-        }
-        var distance = Math.abs(Math.log(scale / profile.scale));
-        if (valid && (error < bestError - 1e-9 || (Math.abs(error - bestError) <= 1e-9 && distance < bestDistance))) {
-            best = scale; bestError = error; bestDistance = distance;
-        }
-    }
-    if (best == null) throw new Error(str.t(
-        'Размеры исходных рамок несовместимы с экшеном: единый масштаб не воспроизводит записанные размеры. Используйте рамки исходных пропорций и относительных размеров или запишите новый экшен.',
-        'The source frames are incompatible with this action: one common scale cannot reproduce the recorded sizes. Use the original frame proportions and relative sizes, or record a new action.'));
-    return best;
+    var height = getMedianHeight(items), scale = profile.height / height;
+    if (!isFinite(height) || height <= 0 || !isFinite(scale) || scale <= 0)
+        throw new Error(str.t('Не удалось определить опорную высоту объектов для экшена.',
+            'Could not determine the reference object height for the action.'));
+    return scale;
 }
 
 function lockedRuntimeScale() {
@@ -360,12 +306,9 @@ function profileFromLayout(plan) {
         scale: plan.commonScale,
         gapY: plan.actualGapY > 0 ? plan.actualGapY : plan.minFinalGapY,
         gapX: plan.actualGapXMin > 0 ? plan.actualGapXMin : plan.minFinalGapX,
-        frames: []
+        height: 0
     };
-    for (var i = 0; i < plan.placements.length; i++) {
-        var item = plan.placements[i];
-        if (!matchesLockedFrame(item.width, item.height, p.frames)) p.frames.push([item.width, item.height]);
-    }
+    p.height = getMedianDimension(plan.placements, 'height');
     validateLockedProfile(p);
     return p;
 }
@@ -892,8 +835,8 @@ function Locale() {
     this.layoutLayers = this.t('Разложить слои', 'Arrange layers');
     this.lockAction = this.t('фиксировать отступы и трансформацию', 'lock gaps and transform');
     this.lockActionTip = this.t(
-        'В экшен записываются размеры рамок в пикселях и общие интервалы X/Y. Количество фото может меняться. При фиксации режим «По ширине» центрирует ряды с единым сохранённым X-интервалом. Несовместимые размеры исходников останавливают раскладку.',
-        'Records frame sizes in pixels and common X/Y gaps. Photo count may change. With locking enabled, Justify centers rows using the saved common X gap. Incompatible source dimensions stop the layout.');
+        'В экшен записываются типичная высота объектов в пикселях и общие интервалы X/Y. Количество фото может меняться. При фиксации режим «По ширине» центрирует ряды с единым сохранённым X-интервалом. Масштаб определяется по типичной (медианной) высоте объектов.',
+        'Records the typical object height in pixels and common X/Y gaps. Photo count may change. With locking enabled, Justify centers rows using the saved common X gap. Scale is based on the typical (median) object height.');
     this.lockActionRecordFirst = this.t(
         'Чтобы включить фиксацию, заново запишите шаг Auto Layout на готовой раскладке: масштаб и интервалы вычисляются только во время успешного запуска.',
         'To enable locking, record the Auto Layout step again on a completed layout: scale and gaps are calculated only during a successful run.');
@@ -949,7 +892,7 @@ function Config() {
                 d.putDouble(app.stringIDToTypeID('lockedScale'), actionLayoutProfile.scale);
                 d.putDouble(app.stringIDToTypeID('lockedGapY'), actionLayoutProfile.gapY);
                 d.putDouble(app.stringIDToTypeID('lockedGapX'), actionLayoutProfile.gapX);
-                d.putString(app.stringIDToTypeID('lockedFrames'), encodeLockedFrames(actionLayoutProfile.frames));
+                d.putDouble(app.stringIDToTypeID('lockedHeight'), actionLayoutProfile.height);
             }
             app.playbackParameters = d;
         } else app.putCustomOptions(UUID, d, true)
@@ -5347,11 +5290,8 @@ function validateLayoutPlan(plan, geometry) {
             if (row.items.length > 1 && Math.abs(row.gapX - actionLayoutProfile.gapX) > 1e-7)
                 throw new Error(str.t('Изменился X-интервал экшена.', 'The action X gap has changed.'));
         }
-        for (var q = 0; q < plan.placements.length; q++) {
-            var frame = plan.placements[q];
-            if (!matchesLockedFrame(frame.right - frame.left, frame.bottom - frame.top, actionLayoutProfile.frames, 1.01))
-                throw new Error(str.t('Изменился размер рамки экшена.', 'An action frame size has changed.'));
-        }
+        if (Math.abs(getMedianDimension(plan.placements, 'height') - actionLayoutProfile.height) > 1e-7)
+            throw new Error(str.t('Изменилась опорная высота экшена.', 'The action reference height has changed.'));
     }
     var eps = 0.05, seenIds = {}, sourceIds = {};
     for (var si = 0; si < sourceState.layerIds.length; si++) sourceIds[String(sourceState.layerIds[si])] = true;
