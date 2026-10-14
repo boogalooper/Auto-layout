@@ -80,7 +80,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.18"
+SERVER_ID = "auto-layout/0.10.19"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 
