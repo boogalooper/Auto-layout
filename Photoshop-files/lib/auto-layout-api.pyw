@@ -80,7 +80,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.31"
+SERVER_ID = "auto-layout/0.10.33"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -1094,7 +1094,26 @@ def analyze_photo(payload, state):
     return answer
 
 
-def balanced_zone_counts(order, width, height, row_count, scale, gx, gy, check):
+def row_rhythm_profile(size, mode):
+    if mode == "auto" or size <= 1:
+        return [0.0] * size
+    if mode in ("alternateWide", "alternateNarrow"):
+        return [float(i % 2 == (0 if mode == "alternateWide" else 1)) for i in range(size)]
+    middle, minimum = (size - 1) / 2, 0 if size % 2 else .5
+    span = middle - minimum
+    central = [1 - (abs(i - middle) - minimum) / span if span > 0 else 1 for i in range(size)]
+    return central if mode == "centerWide" else [1 - value for value in central]
+
+
+def row_rhythm_cost(counts, mode):
+    if mode == "auto" or len(counts) <= 1 or max(counts) == min(counts):
+        return 0.0
+    low, span = min(counts), max(counts) - min(counts)
+    return sum(((count - low) / span - target) ** 2
+               for count, target in zip(counts, row_rhythm_profile(len(counts), mode))) / len(counts)
+
+
+def balanced_zone_counts(order, width, height, row_count, scale, gx, gy, check, rhythm="auto", profile=None):
     """Exact height/balance Pareto frontier for a fixed zone population/rows."""
     n = len(order)
     if row_count <= 1 or n <= row_count:
@@ -1108,7 +1127,8 @@ def balanced_zone_counts(order, width, height, row_count, scale, gx, gy, check):
         metrics.append(row)
     limit_w, limit_h = width / scale, height / scale - gy * (row_count - 1)
     center = (row_count - 1) / 2 - .1
-    states = {0: [(0.0, (0, 0, 0.0), [])]}
+    if profile is None: profile = row_rhythm_profile(row_count, rhythm)
+    states = {0: [(0.0, (0, 0, 0.0, 0.0), [])]}
     for r in range(row_count):
         check()
         next_states = {}
@@ -1123,7 +1143,8 @@ def balanced_zone_counts(order, width, height, row_count, scale, gx, gy, check):
                     h = old_h + rh
                     if h > limit_h + 1e-9: continue
                     score = (old_score[0] + (count == 1), old_score[1] + count * count,
-                             old_score[2] + count * (r - center) ** 2)
+                             old_score[2] - count * profile[r],
+                             old_score[3] + count * (r - center) ** 2)
                     out = next_states.setdefault(end, [])
                     if any(fh <= h + 1e-9 and fs <= score for fh, fs, _ in out): continue
                     out[:] = [(fh, fs, fc) for fh, fs, fc in out if not (h <= fh + 1e-9 and score <= fs)]
@@ -1258,19 +1279,7 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
     total_zone_area = sum(z["width"] * z["height"] for z in zones)
     n = len(items)
     def rhythm_cost(counts):
-        if rhythm == "auto" or len(counts) <= 1 or max(counts) == min(counts):
-            return 0.0
-        low, span = min(counts), max(counts) - min(counts)
-        size = len(counts)
-        def profile(i):
-            if rhythm == "alternateWide": return 1 if i % 2 == 0 else 0
-            if rhythm == "alternateNarrow": return 0 if i % 2 == 0 else 1
-            middle = (size - 1) / 2
-            minimum = 0 if size % 2 else .5
-            span_ = middle - minimum
-            center = 1 - (abs(i - middle) - minimum) / span_ if span_ > 0 else 1
-            return center if rhythm == "centerWide" else 1 - center
-        return sum(((v - low) / span - profile(i)) ** 2 for i, v in enumerate(counts)) / size
+        return row_rhythm_cost(counts, rhythm)
     def search(scale, metrics, area_prefix):
         # State keeps exact consumed count and component mask; fixed-row mode
         # also keeps row count. Per-zone DP tests every consecutive row split.
@@ -1404,26 +1413,44 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
         return dict(status="fallback", reason="No complete layout within search budget", tested=tested)
     scale, order, allocation, metrics = best
     row_specs = []
-    # Balance only the winning complete allocation, at the same scale. A small
-    # separate bounded budget avoids losing that valid incumbent at the deadline.
+    # Refine the winning allocation with a bounded height/balance frontier.
+    # Explicit rhythm may use the shared 1% scale allowance; auto keeps scale.
     balance_deadline = time.monotonic() + 3.0
     def balance_check():
         if request_cancelled(state): raise InterruptedError("Layout cancelled")
         if time.monotonic() > balance_deadline: raise TimeoutError("Row balancing budget exhausted")
+    full_profile = row_rhythm_profile(len(allocation[2]), rhythm)
+    row_offset = 0
     for zi, start, counts in allocation[1]:
         if counts:
             zone = zones[zi]
             try:
                 improved = balanced_zone_counts(order[start:start + sum(counts)], zone["width"], zone["height"],
-                                                len(counts), scale, gx, gy, balance_check)
+                                                len(counts), scale if rhythm == "auto" else scale * (1 - COMPOSITION_MAX_SCALE_LOSS),
+                                                gx, gy, balance_check, rhythm, full_profile[row_offset:row_offset + len(counts)])
                 if improved: counts = improved
             except TimeoutError:
                 budget_exhausted = True
+        row_offset += len(counts)
         for count in counts:
             width, height = metrics[start][count]
             row_specs.append(dict(zoneIndex=zi, ids=[i["id"] for i in order[start:start + count]], contentWidth=width, rowHeight=height))
             start += count
+    reference_scale = scale
+    if rhythm != "auto":
+        # Small caption/effect overhangs must not suppress the selected profile.
+        # Recover the exact largest scale for the new rows, never exceeding the
+        # original geometric optimum or spending more than the shared 1% cap.
+        limit = scale
+        for zi, zone in enumerate(zones):
+            rows = [row for row in row_specs if row["zoneIndex"] == zi]
+            if not rows: continue
+            for row in rows:
+                limit = min(limit, zone["width"] / (row["contentWidth"] + gx * (len(row["ids"]) - 1)))
+            limit = min(limit, zone["height"] / (sum(row["rowHeight"] for row in rows) + gy * (len(rows) - 1)))
+        if limit < scale: scale = math.nextafter(limit, 0.0)
     result = render_zone_layout(row_specs, {i["id"]:i for i in order}, zones, scale, gx, gy, multiplier, align)
+    result["referenceScale"] = reference_scale
     result.update(tested=tested, orders=len(orders), searchSteps=steps, exhaustiveOrders=n <= 6,
                   budgetExhausted=budget_exhausted, elapsed=round(time.monotonic() - started, 3))
     return result
@@ -1591,18 +1618,11 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
                     if item.get("headLeanValid", False): head += .15 * item["headLeanWeight"] * (item["headLean"] / 30 - target) ** 2
                     prev_turn = turn
             previous = sexes
-        # Row rhythm and balance resolve equal semantic scores, after geometry.
-        balance = sum((c - n / len(counts)) ** 2 for c in counts)
-        rhythm_cost = 0.0
-        if rhythm != "auto" and len(counts) > 1 and max(counts) != min(counts):
-            lo, span = min(counts), max(counts) - min(counts)
-            middle = (len(counts) - 1) / 2
-            denominator = middle - (0 if len(counts) % 2 else .5)
-            for index, count in enumerate(counts):
-                central = 1 - (abs(index - middle) - (0 if len(counts) % 2 else .5)) / denominator if denominator > 0 else 1
-                target = central if rhythm == "centerWide" else 1 - central if rhythm == "edgesWide" else float(index % 2 == (0 if rhythm == "alternateWide" else 1))
-                rhythm_cost += ((count - lo) / span - target) ** 2
-        return (bad, bad - good, symmetry, round(minority_center, 8), -vertical, round(head, 9), round(composition_color_cost(plan,by_id,color_mode,color_distances),9), -plan["commonScale"], rhythm_cost, balance)
+        # Geometric row quality and the user's rhythm precede optional
+        # semantic objectives within the admitted 1% scale window.
+        return (row_quality(plan), row_rhythm_cost(counts, rhythm), bad, bad - good,
+                symmetry, round(minority_center, 8), -vertical, round(head, 9),
+                round(composition_color_cost(plan,by_id,color_mode,color_distances),9), -plan["commonScale"])
     def score_key(plan):
         if "_score" not in plan: plan["_score"] = score(plan)
         return plan["_score"]
@@ -1713,14 +1733,16 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
         groups = {}
         for row in plan["rows"]: groups.setdefault(row["zoneIndex"], []).append(len(row["ids"]))
         singletons = excess = 0
+        imbalance = 0.0
         for counts in groups.values():
             if len(counts) > 1:
                 singletons += sum(c == 1 for c in counts)
                 excess += max(0, max(counts) - min(counts) - 2)
-        return singletons, excess
+                imbalance += sum(c * c for c in counts) - sum(counts) ** 2 / len(counts)
+        return singletons, excess, round(imbalance, 8)
     baseline_quality = row_quality(baseline)
     # All candidates are complete plans. The geometric incumbent is always kept.
-    candidates = [baseline]; best_scale = baseline["commonScale"]; evaluated = 0
+    candidates = [baseline]; best_scale = baseline.get("referenceScale", baseline["commonScale"]); evaluated = 0
     skeletons, seen = [], set()
     def add_skeleton(rows):
         if len({i["priority"] for i in by_id.values()}) > 1:
@@ -1809,7 +1831,7 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
     best = min(eligible, key=score_key)
     best = {k:v for k,v in best.items() if k != "_score"}
     best.update(compositionSearch=True, referenceScale=best_scale, maxScaleLoss=scale_loss_limit,
-                compositionEvaluated=evaluated, compositionTopologies=len(skeletons), compositionScore=list(score(best)[:6]), compositionColorCost=composition_color_cost(best,by_id,color_mode,color_distances),
+                compositionEvaluated=evaluated, compositionTopologies=len(skeletons), compositionScore=list(score(best)[2:8]), compositionColorCost=composition_color_cost(best,by_id,color_mode,color_distances),
                 budgetExhausted=exhausted or baseline.get("budgetExhausted",False),
                 geometryBaseline={k:v for k,v in baseline.items() if k != "_score"}, elapsed=round(time.monotonic()-started,3))
     return best

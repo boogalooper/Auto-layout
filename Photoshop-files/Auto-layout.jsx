@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.31 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.33 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -44,7 +44,7 @@
 
 $.localize = true;
 
-var ver = '0.10.31',
+var ver = '0.10.33',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -181,7 +181,7 @@ function main() {
                 if (cappedPlan) return cappedPlan;
             }
             var seed = useGender ? buildGenderAwareLayoutPlan(items, selectionGeometry) : buildLayoutPlan(items, selectionGeometry);
-            if (compositionSearchRequested(items) && !seed.pythonComposition) {
+            if (cfg.pythonPacking && !alphabetical && !lockedLayoutActive() && !seed.pythonPacking) {
                 var expanded = tryPythonZoneLayout(items, selectionGeometry, seed.baseGapX, seed.baseGapY, seed);
                 if (expanded) return expanded;
             }
@@ -405,7 +405,8 @@ function buildLockedLayoutPlan(items, geometry) {
                 zoneIndex: assignment.zoneIndex, componentIndex: zone.componentIndex });
             start += packed.count;
         }
-        balanceZoneRows(specs, indices, zone, scale, gx, gy);
+        balanceZoneRows(specs, indices, zone, scale, gx, gy,
+            getRowRhythmProfile(allocation.rowCount, cfg.rowRhythm).slice(specs.length - indices.length, specs.length));
         if (!placeContainerVerticalGroup(specs, indices, scale, profile.gapY, zone.top, zone.bottom))
             throw new Error(str.t('Ряды не помещаются с зафиксированным интервалом.', 'The rows do not fit with the locked gap.'));
     }
@@ -634,7 +635,7 @@ function dialog(editingAction) {
     ok.text = editingAction ? str.saveAction : str.layoutLayers
     chLockAction.text = str.lockAction
     chLockAction.value = !!cfg.lockForAction;
-    chLockAction.onClick = function () { cfg.lockForAction = !!this.value; };
+    chLockAction.onClick = function () { cfg.lockForAction = !!this.value; updateAdditionalEnabled(); };
     chLockAction.helpTip = str.lockActionTip;
     if (editingAction && !cfg.lockForAction && !actionLayoutProfile) {
         chLockAction.enabled = false;
@@ -682,11 +683,15 @@ function dialog(editingAction) {
         cfg.alphabetOrder = text == str.alphabetPage ? 'page' : text == str.alphabetZone ? 'zone' : 'off';
     }
     function updateAdditionalEnabled() {
-        var normal = !alphabetOrderActive();
-        chPythonPacking.enabled = normal;
+        var normal = !alphabetOrderActive(),
+            fixed = !!(editingAction && cfg.lockForAction && typeof actionLayoutProfile != 'undefined' && actionLayoutProfile);
+        pnGaps.enabled = slGapX.enabled = slGapY.enabled = slGapMax.enabled = !fixed;
+        pnGaps.helpTip = fixed ? str.t('Используются записанные в экшене интервалы X/Y в пикселях. Чтобы задать их заново, перезапишите экшен.', 'Uses the X/Y pixel gaps recorded in the action. Record the action again to set new gaps.') : '';
+        chPythonPacking.enabled = normal && !fixed;
         chAlternateGender.enabled = normal && pythonAvailability.available;
         chHeadTurn.enabled = normal && headAvailability.available;
         dlColor.enabled = stColor.enabled = normal && pythonAvailability.available;
+        updateGapLabels();
     }
 
     updateGapLabels()
@@ -795,9 +800,10 @@ function dialog(editingAction) {
     }
 
     function updateGapLabels() {
-        stGapXValue.text = cfg.gapX + '%'
-        stGapYValue.text = cfg.gapY + '%'
-        stGapMaxValue.text = '×' + cfg.maxGapMultiplier
+        var fixed = !!(editingAction && cfg.lockForAction && typeof actionLayoutProfile != 'undefined' && actionLayoutProfile);
+        stGapXValue.text = fixed ? round2(actionLayoutProfile.gapX) + ' px' : cfg.gapX + '%';
+        stGapYValue.text = fixed ? round2(actionLayoutProfile.gapY) + ' px' : cfg.gapY + '%';
+        stGapMaxValue.text = fixed ? '—' : '×' + cfg.maxGapMultiplier;
     }
 
     function updateGapMaxTitle() {
@@ -4547,6 +4553,37 @@ function compositionSearchRequested(items) {
     return palettes >= 2;
 }
 
+function getCompositionRowQuality(plan) {
+    var groups = {}, counts = [], singles = 0, excess = 0, imbalance = 0, r, key;
+    for (r = 0; r < plan.rows.length; r++) {
+        var row = plan.rows[r], count = row.items.length;
+        key = row.zoneIndex != undefined ? String(row.zoneIndex) : 'all';
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(count); counts.push(count);
+    }
+    for (key in groups) if (groups.hasOwnProperty(key)) {
+        var local = groups[key], total = 0, squares = 0, lo = 1e100, hi = 0;
+        if (local.length <= 1) continue;
+        for (r = 0; r < local.length; r++) {
+            count = local[r]; total += count; squares += count * count;
+            if (count == 1) singles++;
+            lo = Math.min(lo, count); hi = Math.max(hi, count);
+        }
+        excess += Math.max(0, hi - lo - 2);
+        imbalance += squares - total * total / local.length;
+    }
+    return [singles, excess, imbalance, getRowRhythmPenalty(counts, cfg.rowRhythm)];
+}
+
+function compareCompositionRows(a, b) {
+    var qa = getCompositionRowQuality(a), qb = getCompositionRowQuality(b);
+    for (var i = 0; i < qa.length; i++) {
+        if (qa[i] < qb[i] - 1e-8) return -1;
+        if (qa[i] > qb[i] + 1e-8) return 1;
+    }
+    return 0;
+}
+
 function optimizeCompositionAssignment(plan, geometry, useGender, useHead, useColor) {
     if (!plan.pythonComposition) return optimizeSemanticAssignment(plan, geometry, useGender, useHead);
     if (useColor == undefined) useColor = normalizeColorMode(cfg.colorMode) != 'off';
@@ -4572,8 +4609,9 @@ function optimizeCompositionAssignment(plan, geometry, useGender, useHead, useCo
             colorCost = colorAssignmentCost(candidate, cfg.colorMode, distances);
         }
         var sameSemantics = best && !betterSemanticAssignment(score, bestScore, useHead) && !betterSemanticAssignment(bestScore, score, useHead);
-        if (!best || betterSemanticAssignment(score, bestScore, useHead) || (sameSemantics &&
-            (colorCost < bestColor - 1e-8 || (Math.abs(colorCost - bestColor) <= 1e-8 && candidate.commonScale > best.commonScale + 1e-9)))) {
+        var rowOrder = best ? compareCompositionRows(candidate, best) : -1;
+        if (!best || rowOrder < 0 || (rowOrder == 0 && (betterSemanticAssignment(score, bestScore, useHead) || (sameSemantics &&
+            (colorCost < bestColor - 1e-8 || (Math.abs(colorCost - bestColor) <= 1e-8 && candidate.commonScale > best.commonScale + 1e-9)))))) {
             best = candidate; bestScore = score; bestColor = colorCost;
         }
     }
@@ -4740,16 +4778,17 @@ function decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGa
     return plan;
 }
 
-function balanceZoneRows(specs, indices, zone, scale, baseGapX, baseGapY) {
+function balanceZoneRows(specs, indices, zone, scale, baseGapX, baseGapY, profile) {
     var items = [], r, i;
     for (r = 0; r < indices.length; r++) items = items.concat(specs[indices[r]].items);
     var n = items.length, rows = indices.length;
     if (rows <= 1 || n <= rows) return;
     var metrics = buildFastShapeSegmentCache(items), limitW = (zone.right - zone.left) / scale,
         limitH = (zone.bottom - zone.top) / scale - baseGapY * (rows - 1),
-        center = (rows - 1) / 2 - 0.1, states = { '0': [{ height: 0, score: [0, 0, 0], counts: [] }] };
+        center = (rows - 1) / 2 - 0.1, states = { '0': [{ height: 0, score: [0, 0, 0, 0], counts: [] }] };
+    if (!profile) profile = getRowRhythmProfile(rows, cfg.rowRhythm);
     function compare(a, b) {
-        for (var k = 0; k < 3; k++) if (Math.abs(a[k] - b[k]) > 1e-8) return a[k] < b[k] ? -1 : 1;
+        for (var k = 0; k < a.length; k++) if (Math.abs(a[k] - b[k]) > 1e-8) return a[k] < b[k] ? -1 : 1;
         return 0;
     }
     // Keep the Pareto frontier of required height and additive balance score.
@@ -4775,7 +4814,8 @@ function balanceZoneRows(specs, indices, zone, scale, baseGapX, baseGapY) {
                     if (!next[String(end)]) next[String(end)] = [];
                     add(next[String(end)], { height: height, counts: old.counts.concat([count]),
                         score: [old.score[0] + (count == 1 ? 1 : 0), old.score[1] + count * count,
-                            old.score[2] + count * (r - center) * (r - center)] });
+                            old.score[2] - count * profile[r],
+                            old.score[3] + count * (r - center) * (r - center)] });
                 }
             }
         }
@@ -4886,7 +4926,8 @@ function buildMultiZoneLayoutFast(items, geometry, baseGapX, baseGapY) {
 
     for (var vg = 0; vg < verticalGroups.length; vg++) {
         var group = verticalGroups[vg];
-        balanceZoneRows(rowSpecs, group.rowIndices, zones[group.zoneIndex], commonScale, baseGapX, baseGapY);
+        balanceZoneRows(rowSpecs, group.rowIndices, zones[group.zoneIndex], commonScale, baseGapX, baseGapY,
+            getRowRhythmProfile(rowSpecs.length, cfg.rowRhythm).slice(group.rowIndices[0], group.rowIndices[0] + group.rowIndices.length));
     }
     var vertical = resolveVerticalLayout(rowSpecs, verticalGroups, commonScale, baseGapY);
     if (!vertical) return null;
