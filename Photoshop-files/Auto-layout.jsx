@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.25 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.30 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -32,7 +32,8 @@
  *  - optional 3D body/head composition towards the global center, preserving row gender counts;
  *  - one common scale for all selected layers;
  *  - bounds are read from boundsNoEffects;
- *  - selected layers are processed in palette order, top to bottom;
+ *  - hard whole-sheet beginning/end categories selected by layer color labels;
+ *  - palette order is the default within each category;
  *  - items inside each row are aligned by their top edge;
  *  - rows support left / center / right / justified horizontal distribution;
  *  - shared horizontal and vertical policies finalize rectangle, shaped and multi-zone layouts;
@@ -43,7 +44,7 @@
 
 $.localize = true;
 
-var ver = '0.10.25',
+var ver = '0.10.30',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -134,6 +135,7 @@ function main() {
 
         isCancelled = false;
         historyState = activeDocument.activeHistoryState;
+        validatePrioritySettings();
         sourceState = collectDocumentState();
         inputPreparation = buildInputPreparation(sourceState.layerIds);
         var alphabetical = alphabetOrderActive(),
@@ -154,7 +156,8 @@ function main() {
         items = runLayoutProgressStage('Reading layer sizes', function () {
             return collectLayoutItems(sourceState.layerIds);
         }, 8, 30);
-        originalItems = items; // Keep proxy-to-root correspondence before page sorting.
+        originalItems = items; // Keep proxy-to-root correspondence before any sorting.
+        items = assignLabelPriorities(items);
         if (alphabetical) runLayoutProgressStage('Reading alphabetical names', function () {
             prepareAlphabeticalKeys(items);
             if (cfg.alphabetOrder == 'page') items = sortAlphabeticalItems(items);
@@ -171,6 +174,11 @@ function main() {
             useHead = !!(headTurnSummary && !headTurnSummary.fallbackToGeometry);
         }, 30, 32);
         layoutPlan = runLayoutProgressStage('Calculating selection packing', function () {
+            if (cfg.noEnlarge && cfg.pythonPacking && !lockedLayoutActive() && !alphabetOrderActive()) {
+                var median = getMedianHeight(items), cappedPlan = tryPythonZoneLayout(items, selectionGeometry,
+                    median * cfg.gapX / 100, median * cfg.gapY / 100);
+                if (cappedPlan) return cappedPlan;
+            }
             var seed = useGender ? buildGenderAwareLayoutPlan(items, selectionGeometry) : buildLayoutPlan(items, selectionGeometry);
             if (compositionSearchRequested(items) && !seed.pythonComposition) {
                 var expanded = tryPythonZoneLayout(items, selectionGeometry, seed.baseGapX, seed.baseGapY, seed);
@@ -307,7 +315,9 @@ function resolveLockedScale(items, profile) {
     if (!isFinite(height) || height <= 0 || !isFinite(scale) || scale <= 0)
         throw new Error(str.t('Не удалось определить опорную высоту объектов для экшена.',
             'Could not determine the reference object height for the action.'));
-    return scale;
+    if (cfg.noEnlarge && scale > 1 + 1e-12)
+        throw new Error(str.t('Фиксированный экшен требует увеличить слои, но увеличение запрещено. Используйте объекты большего размера или перезапишите экшен.', 'The fixed action requires enlargement, but enlargement is disabled. Use larger source objects or record the action again.'));
+    return cfg.noEnlarge ? Math.min(1, scale) : scale;
 }
 
 function lockedRuntimeScale() {
@@ -326,7 +336,7 @@ function profileFromLayout(plan) {
     return p;
 }
 
-function lockedGapPolicy(specs, profile, baseGapX) {
+function lockedGapPolicy(specs, profile) {
     // A fixed action uses one global X gap, including Justify.
     var byRow = {}, adjacent = false;
     for (var i = 0; i < specs.length; i++) {
@@ -352,7 +362,7 @@ function freezeLayoutMetrics(plan, geometry) {
     }
     var baseGapX = profile.gapX / profile.scale,
         frozen = finalizeLayoutRows(specs, profile.scale, baseGapX, profile.gapY / profile.scale,
-            plan.actualGapY, plan, lockedGapPolicy(specs, profile, baseGapX));
+            plan.actualGapY, plan, lockedGapPolicy(specs, profile));
     if (!frozen) throw new Error(str.t('Не удалось зафиксировать интервалы раскладки.', 'Could not lock the layout gaps.'));
     frozen.autoRows = plan.autoRows;
     frozen.lockedMetrics = true;
@@ -379,7 +389,7 @@ function buildLockedLayoutPlan(items, geometry) {
         allocation = findMultiZoneAllocation(items, zones, scale, gx, gy, buildFastShapeSegmentCache(items),
             desiredRows, geometry.componentCount || 1);
     if (!allocation) throw new Error(str.t('Фотографии не помещаются при масштабе и интервалах, записанных в экшене. Уменьшите количество фото или запишите новую раскладку.', 'The photos do not fit with the scale and gaps recorded in the action. Reduce the number of photos or record a new layout.'));
-    var specs = [], groups = [], hasLockedVerticalGap = false;
+    var specs = [], hasLockedVerticalGap = false;
     for (var a = 0; a < allocation.assignments.length; a++) {
         var assignment = allocation.assignments[a];
         if (!assignment || !assignment.rows.length) continue;
@@ -399,7 +409,7 @@ function buildLockedLayoutPlan(items, geometry) {
     var plan = finalizeLayoutRows(specs, scale, gx, gy, hasLockedVerticalGap ? profile.gapY : 0, {
         shapedSelection: !geometry.isRectangle, multiZoneSelection: !!geometry.multiZone,
         zoneCount: zones.length, usedZoneCount: allocation.usedZones, usedComponentCount: allocation.usedComponentCount,
-        solverPasses: 1, lockedMetrics: true }, lockedGapPolicy(specs, profile, gx));
+        solverPasses: 1, lockedMetrics: true }, lockedGapPolicy(specs, profile));
     if (!plan) throw new Error(str.t('Не удалось построить раскладку с параметрами экшена.', 'Could not build a layout using the action parameters.'));
     plan.autoRows = cfg.autoRows;
     validateLayoutPlan(plan, geometry);
@@ -504,8 +514,8 @@ function layoutUnitProgress(done, total, text) {
 }
 
 function dialog(editingAction) {
-    var dlg = new Window("dialog{orientation:'column',alignChildren:['fill','top'],spacing:10,margins:16}"),
-        pnLayout = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:10,margins:[10,20,10,10]}"),
+    var dlg = new Window("dialog{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:14}"),
+        pnLayout = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
         chAutoRows = pnLayout.add('checkbox'),
         grRows = pnLayout.add("group{orientation:'row',alignChildren:['left','center'],spacing:8,margins:0}"),
         stRows = grRows.add("statictext{preferredSize:[125,-1]}"),
@@ -516,8 +526,9 @@ function dialog(editingAction) {
         grAlign = pnLayout.add("group{orientation:'row',alignChildren:['left','center'],spacing:8,margins:0}"),
         stAlign = grAlign.add("statictext{preferredSize:[125,-1]}"),
         dlAlign = grAlign.add("dropdownlist{preferredSize:[170,-1]}"),
+        chNoEnlarge = pnLayout.add('checkbox'),
 
-        pnGaps = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:10,margins:[10,20,10,10]}"),
+        pnGaps = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
         grGapX = pnGaps.add("group{orientation:'column',alignChildren:['fill','center'],spacing:0,margins:0}"),
         grGapXTitle = grGapX.add("group{orientation:'row',alignChildren:['left','center'],spacing:0,margins:0}"),
         stGapXTitle = grGapXTitle.add("statictext{preferredSize:[210,-1]}"),
@@ -535,9 +546,8 @@ function dialog(editingAction) {
         stGapMaxTitle = grGapMaxTitle.add("statictext{preferredSize:[210,-1]}"),
         stGapMaxValue = grGapMaxTitle.add("statictext{preferredSize:[45,-1],justify:'right'}"),
         slGapMax = grGapMax.add("slider{minvalue:1,maxvalue:4,preferredSize:[255,-1]}"),
-        stGapHint = pnGaps.add("statictext{properties:{multiline:true},preferredSize:[303,68]}"),
 
-        pnAdditional = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:10,margins:[10,20,10,10]}"),
+        pnAdditional = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
         dlAlphabet = pnAdditional.add('dropdownlist'),
         chPythonPacking = pnAdditional.add('checkbox'),
         chAlternateGender = pnAdditional.add('checkbox'),
@@ -545,9 +555,16 @@ function dialog(editingAction) {
         stColor = pnAdditional.add('statictext', undefined, str.colorTitle),
         dlColor = pnAdditional.add('dropdownlist'),
         stPythonStatus = pnAdditional.add("statictext{properties:{multiline:true},preferredSize:[255,-1]}"),
-        pnOutput = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:10,margins:[10,20,10,10]}"),
+        pnPriority = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
+        grPriorityStart = pnPriority.add("group{orientation:'row',alignChildren:['left','center'],spacing:8}"),
+        stPriorityStart = grPriorityStart.add("statictext{preferredSize:[125,-1]}"),
+        dlPriorityStart = grPriorityStart.add("dropdownlist{preferredSize:[170,-1]}"),
+        grPriorityEnd = pnPriority.add("group{orientation:'row',alignChildren:['left','center'],spacing:8}"),
+        stPriorityEnd = grPriorityEnd.add("statictext{preferredSize:[125,-1]}"),
+        dlPriorityEnd = grPriorityEnd.add("dropdownlist{preferredSize:[170,-1]}"),
+        pnOutput = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
         chGroupRows = pnOutput.add('checkbox'),
-        pnAction = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:10,margins:[10,20,10,10]}"),
+        pnAction = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
         chLockAction = pnAction.add('checkbox'),
 
         grButtons = dlg.add("group{orientation:'row',alignChildren:['center','center'],spacing:10,margins:0}"),
@@ -562,8 +579,16 @@ function dialog(editingAction) {
     stGapXTitle.alignment = stGapYTitle.alignment = stGapMaxTitle.alignment = ['fill', 'center'];
     stGapXValue.alignment = stGapYValue.alignment = stGapMaxValue.alignment = ['right', 'center'];
     slGapX.alignment = slGapY.alignment = slGapMax.alignment = ['fill', 'center'];
-    stGapHint.alignment = stPythonStatus.alignment = ['fill', 'top'];
+    stPythonStatus.alignment = ['fill', 'top'];
     dlColor.alignment = dlAlphabet.alignment = ['fill', 'center'];
+    grPriorityStart.alignment = grPriorityEnd.alignment = ['fill', 'center'];
+    dlPriorityStart.alignment = dlPriorityEnd.alignment = ['fill', 'center'];
+    pnPriority.text = str.t('Приоритеты по меткам', 'Layer label priorities');
+    stPriorityStart.text = str.t('В начале листа', 'At sheet beginning');
+    stPriorityEnd.text = str.t('В конце листа', 'At sheet end');
+    populatePriorityDropdown(dlPriorityStart, cfg.priorityStartLabel);
+    populatePriorityDropdown(dlPriorityEnd, cfg.priorityEndLabel);
+    dlPriorityStart.helpTip = dlPriorityEnd.helpTip = str.t('Строгий порядок для всего листа: начало, остальные, конец. Внутри категории действует выбранный способ раскладки.', 'Strict whole-sheet order: beginning, remaining photos, end. The selected layout policy applies within each category.');
 
     dlg.text = 'Auto layout ' + ver
     pnLayout.text = str.layoutPanel
@@ -585,14 +610,18 @@ function dialog(editingAction) {
     dlAlign.add('item', str.alignCenter)
     dlAlign.add('item', str.alignRight)
     dlAlign.add('item', str.alignJustify)
+    dlAlign.helpTip = str.t('Если блок не заполняет площадку при рассчитанных размерах и интервалах, он центрируется; короткие ряды сохраняют выравнивание внутри блока.', 'If the block does not fill its zone at the calculated sizes and gaps, the block is centered; shorter rows keep their alignment within it.');
     stGapXTitle.text = str.gapX
     stGapYTitle.text = str.gapY
     stGapMaxTitle.text = str.maxGap
-    stGapHint.text = str.gapHint
     dlAlphabet.add('item', str.alphabetOff);
     dlAlphabet.add('item', str.alphabetPage);
     dlAlphabet.add('item', str.alphabetZone);
     dlAlphabet.helpTip = str.alphabetTip;
+    chNoEnlarge.text = str.t('Не увеличивать размер слоёв', 'Do not enlarge layers');
+    chNoEnlarge.helpTip = str.t('Масштаб не выше 100%. Уменьшение разрешено, увеличение запрещено. Если объекты уже помещаются, геометрический расчёт сохраняет их размер.', 'Scale is capped at 100%. Shrinking is allowed, enlargement is disabled. Geometry preserves the current sizes when they already fit.');
+    chNoEnlarge.value = !!cfg.noEnlarge;
+    chNoEnlarge.onClick = function () { cfg.noEnlarge = this.value; };
     chPythonPacking.text = str.pythonPacking;
     chPythonPacking.helpTip = str.pythonPackingTip;
     chAlternateGender.text = str.alternateGender
@@ -663,7 +692,7 @@ function dialog(editingAction) {
     }
 
     updateGapLabels()
-    updateGapHint()
+    updateGapMaxTitle()
 
     chAutoRows.onClick = function () {
         cfg.autoRows = this.value
@@ -697,7 +726,7 @@ function dialog(editingAction) {
             case 3: cfg.horizontalAlign = 'justify'; break;
             default: cfg.horizontalAlign = 'center'; break;
         }
-        updateGapHint()
+        updateGapMaxTitle()
     }
 
     slGapX.onChanging = function () {
@@ -724,6 +753,10 @@ function dialog(editingAction) {
     chGroupRows.onClick = function () { cfg.groupRows = this.value }
 
     ok.onClick = function () {
+        cfg.priorityStartLabel = priorityDropdownValue(dlPriorityStart);
+        cfg.priorityEndLabel = priorityDropdownValue(dlPriorityEnd);
+        try { validatePrioritySettings(); } catch (priorityError) { alert(priorityError.message, 'Auto layout'); return; }
+        cfg.noEnlarge = !!chNoEnlarge.value;
         readAlphabetSelection();
         // Read the selected item explicitly, even if ScriptUI skipped onChange.
         if (dlColor.selection) cfg.colorMode = colorModeFromSelection(dlColor.selection);
@@ -763,12 +796,8 @@ function dialog(editingAction) {
         stGapMaxValue.text = '×' + cfg.maxGapMultiplier
     }
 
-    function updateGapHint() {
+    function updateGapMaxTitle() {
         stGapMaxTitle.text = cfg.horizontalAlign == 'justify' ? str.maxGapY : str.maxGap
-        if (cfg.horizontalAlign == 'justify')
-            stGapHint.text = str.justifyGapHint
-        else
-            stGapHint.text = str.gapHint
     }
 
     return dlg
@@ -813,15 +842,11 @@ function colorModeFromSelection(selection) {
     return 'off';
 }
 
-function colorModeLabel(value) {
-    return getColorModes()[colorModeIndex(value)].label;
-}
 
 
 function Locale() {
     var locale = String($.locale || '').toLowerCase(),
         isRu = locale.indexOf('ru') == 0;
-    this.isRu = isRu;
     this.t = function (ru, en) { return isRu ? ru : en; };
 
     this.layoutPanel = this.t('Раскладка', 'Layout');
@@ -846,12 +871,6 @@ function Locale() {
     this.gapY = this.t('Минимальный интервал Y, %', 'Minimum gap Y, %');
     this.maxGap = this.t('Максимальное увеличение', 'Maximum increase');
     this.maxGapY = this.t('Максимальное увеличение (Y)', 'Maximum increase (Y)');
-    this.gapHint = this.t(
-        'Интервалы могут увеличиваться для более полного заполнения выделенной области, но никогда не становятся меньше заданного минимума.',
-        'Gaps may increase to fill the selected area more fully, but never become smaller than the specified minimum.');
-    this.justifyGapHint = this.t(
-        'По ширине: горизонтальный интервал растягивается до границ выделения и не ограничивается максимальным множителем. Минимальный Gap X сохраняется; по Y действует обычный лимит.',
-        'Justify: the horizontal gap stretches to the selection edges and is not limited by the maximum multiplier. Minimum Gap X is preserved; the normal limit still applies to Y.');
     this.alphabetOff = this.t('Без сортировки по алфавиту', 'No alphabetical ordering');
     this.alphabetPage = this.t('По алфавиту в пределах страницы', 'Alphabetical across the page');
     this.alphabetZone = this.t('По алфавиту в пределах зоны', 'Alphabetical within each zone');
@@ -891,6 +910,9 @@ function Locale() {
 function Config() {
     var settingsObj = this;
 
+    this.priorityStartLabel = 'off'
+    this.priorityEndLabel = 'off'
+    this.noEnlarge = false
     this.autoRows = true
     this.rows = 5
     this.rowRhythm = 'auto'
@@ -912,6 +934,9 @@ function Config() {
             descriptorToObject(settingsObj, d)
         } catch (e) { }
 
+        this.priorityStartLabel = normalizePriorityLabel(this.priorityStartLabel);
+        this.priorityEndLabel = normalizePriorityLabel(this.priorityEndLabel);
+        this.noEnlarge = this.noEnlarge === true;
         this.alphabetOrder = normalizeAlphabetOrder(this.alphabetOrder);
         this.colorMode = normalizeColorMode(this.colorMode);
         this.rows = Math.max(1, Math.round(Number(this.rows) || 1))
@@ -924,6 +949,8 @@ function Config() {
     }
 
     this.putScriptSettings = function (toAction) {
+        settingsObj.priorityStartLabel = normalizePriorityLabel(settingsObj.priorityStartLabel);
+        settingsObj.priorityEndLabel = normalizePriorityLabel(settingsObj.priorityEndLabel);
         settingsObj.alphabetOrder = normalizeAlphabetOrder(settingsObj.alphabetOrder);
         settingsObj.colorMode = normalizeColorMode(settingsObj.colorMode);
         var d = objectToDescriptor(settingsObj);
@@ -959,7 +986,7 @@ function Config() {
 
     function objectToDescriptor(o) {
         var d = new ActionDescriptor,
-            properties = ['autoRows', 'rows', 'rowRhythm', 'horizontalAlign', 'gapX', 'gapY', 'maxGapMultiplier', 'alphabetOrder', 'alternateGender', 'considerHeadTurn', 'colorMode', 'pythonPacking', 'lockForAction', 'groupRows'];
+            properties = ['priorityStartLabel', 'priorityEndLabel', 'noEnlarge', 'autoRows', 'rows', 'rowRhythm', 'horizontalAlign', 'gapX', 'gapY', 'maxGapMultiplier', 'alphabetOrder', 'alternateGender', 'considerHeadTurn', 'colorMode', 'pythonPacking', 'lockForAction', 'groupRows'];
 
         for (var i = 0; i < properties.length; i++) {
             var key = properties[i],
@@ -1009,9 +1036,6 @@ function collectDocumentState() {
     };
 }
 
-function getSelectedLayerIds() {
-    return readSelectedLayerSnapshot().ids;
-}
 
 function getSelectedLayerCount() {
     var sel = doc.getProperty('targetLayersIDs');
@@ -1846,6 +1870,7 @@ function readPreparationLayer(d, index) {
     if (section == 'layerSectionEnd') return { section: section };
     var node = { id: d.getInteger(s2t('layerID')), name: d.getString(s2t('name')),
         kind: has('layerKind') ? d.getInteger(s2t('layerKind')) : 7, section: section,
+        colorLabel: readLayerColorLabel(d),
         itemIndex: index, parentId: null, children: [], links: [], text: '', clipped: has('group') && d.getBoolean(s2t('group')),
         background: has('background') && d.getBoolean(s2t('background')),
         artboard: has('artboardEnabled') && d.getBoolean(s2t('artboardEnabled')), locking: {}, blendMode: '' };
@@ -1975,7 +2000,7 @@ function planInputPreparation(tree, selectedIds) {
         var fallback = roots[0], rank = { '5': 4, '1': 3, '7': 2, '4': 1, '3': 0 };
         for (j = 1; j < roots.length; j++) if ((rank[String(roots[j].kind)] || 0) > (rank[String(fallback.kind)] || 0)) fallback = roots[j];
         var unit = { roots: roots, members: all, convert: convert, name: convert && texts.length ? texts.join(' ') : fallback.name,
-            order: roots[0].itemIndex };
+            order: roots[0].itemIndex, priority: priorityForRoots(roots) };
         if (convert) validatePreparationContext(unit, tree);
         units.push(unit);
     }
@@ -2068,16 +2093,14 @@ function buildPreparedOriginalMap() {
             unit: unit,
             roots: roots,
             proxy: proxy,
-            placement: placementByProxyId[String(proxy.id)],
-            scaledProxyLeft: NaN,
-            scaledProxyTop: NaN
+            placement: placementByProxyId[String(proxy.id)]
         };
     }
     return byProxyId;
 }
 
 function validateOriginalPreparationUnits(preparedMap) {
-    var usedRoots = {}, mapped = 0, proxyKey, i, r;
+    var usedRoots = {}, mapped = 0, proxyKey, r;
     for (proxyKey in preparedMap) if (preparedMap.hasOwnProperty(proxyKey)) {
         mapped++;
         var entry = preparedMap[proxyKey];
@@ -2153,7 +2176,11 @@ function applyPreparedLayoutPlan(preparedMap) {
             var p = layoutPlan.placements[i], entry = preparedMap[String(p.layerId)];
             layoutUnitProgress(i, total, i + '/' + total);
             lr.selectLayers(entry.roots);
-            if (Math.abs(scale - 1) > 0.0000001 || Math.abs(entry.transformOffsetX) > 0.0001 || Math.abs(entry.transformOffsetY) > 0.0001)
+            if (cfg.noEnlarge && scale > 1 + 1e-12) throw new Error(str.t('Увеличение слоёв запрещено.', 'Layer enlargement is disabled.'));
+            if (cfg.noEnlarge && Math.abs(scale - 1) <= 1e-12) {
+                if (Math.abs(entry.transformOffsetX) > 0.0001 || Math.abs(entry.transformOffsetY) > 0.0001)
+                    lr.move(entry.transformOffsetX, entry.transformOffsetY);
+            } else if (Math.abs(scale - 1) > 0.0000001 || Math.abs(entry.transformOffsetX) > 0.0001 || Math.abs(entry.transformOffsetY) > 0.0001)
                 lr.transformSelection(scale * 100, entry.transformOffsetX, entry.transformOffsetY);
             if (layoutPlan.lockedMetrics)
                 validateAppliedBounds(entry.expectedBounds, getPreparedUnitTransformBounds(entry.roots), p.name);
@@ -2209,7 +2236,7 @@ function readLayoutLayerDescriptor(d, fallbackId, order) {
         throw new Error(str.t('Слой "', 'Layer "') + name + str.t('" имеет некорректный bounding box.', '" has an invalid bounding box.'));
 
     return {
-        id: id, name: name, kind: kind, order: order, itemIndex: itemIndex,
+        id: id, name: name, kind: kind, order: order, itemIndex: itemIndex, colorLabel: readLayerColorLabel(d),
         left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom,
         width: bounds.width, height: bounds.height, centerX: bounds.centerX, centerY: bounds.centerY
     };
@@ -2225,12 +2252,107 @@ function collectLayoutItems(ids) {
         var id = ids[i];
         progress(8 + 22 * (i / Math.max(1, count)), 'Layers ' + i + '/' + count);
         var d = cache && cache[String(id)] ? cache[String(id)] : lr.getDescriptor(id, false);
-        output.push(readLayoutLayerDescriptor(d, id, i));
+        var item = readLayoutLayerDescriptor(d, id, i);
+        if (typeof inputPreparation != 'undefined' && inputPreparation) item.priority = inputPreparation.units[i].priority;
+        output.push(item);
         progress(8 + 22 * ((i + 1) / Math.max(1, count)), 'Layers ' + (i + 1) + '/' + count);
     }
     return output;
 }
 
+
+function getPriorityLabels() {
+    // Dropdown swatches from Batch for layers; all behaviour belongs to Auto Layout.
+    return [
+        { value: 'off', label: str.t('Не задано', 'Not set'), icon: null },
+        { value: 'none', label: str.t('Без цветовой метки', 'No color label'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00\u00CEIDAT\x18\u0095\u008D\u0090A\x0BE@\x14\u0085\u00CFLS\u00A2,D6~\u0083R\u00CAF\u00E4WS\u0094\u0094\u00C8N\u00F9\x19R\u00D6\x12^s\u00DF3\u00CF\u00EA\u00F5NM3\u00E7\u00CE\u0099\u00B9_\u0097\x15Eq\u00E1\x0F\t\x19\t\u0082\x00\u00D7uA\bA\u00FBS\u00D2\u008F\u00E3\b\u008E\u008F\x19\u0086\x01\u0086a\u00C0u]Z\u009A\u00A6\u00A1\u00EB:\u00F5\u0090\u0082\u009CsDQ\u0084\u00B2,\u00B1m\x1B\u00D6uE]\u00D7H\u0092\x04\u008C1\nRk)\u00CF\u00F3\u00E0\u00FB>\u00F2<'\x1F\u00C71\x1C\u00C7\u00C1<\u00CF\u00DF\x1Fo\u0099\u00A6\u00A9\u00CE\x12\u00E3)\u00C5\u00B8,\x0B\u00FA\u00BEG\u009A\u00A6\b\u00C3\x10UU\x11\u00C2-j-9\u00DA\u00B6E\u0096e\u00B0,\x0B\u00B6mC\u00D7u4MC\b\u00F2\u009E\u0082\u00C7qPa\u00DFw\u00C5ts\u009E\u00E7\u00F9\x1E\u009D,L\u00D3\u00F4{\u00E2\x00^\u00D6\u0089Tf\u00E31\u0087\u00CC\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'red', label: str.t('Красный', 'Red'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00;IDAT\x18\u0095c\u00FCci\u00F3\u009F\u0081\b\u00C0\x02R\u00C2((\u0084W\u00E5\u00FF\u00F7\u00EF \n\u00C1\u0080\u0087\x17\u00BB\u00AA/\u009F\u00C1\x14\x131\u00D6\x0E\x15\u0085\b_C}\u0087W!(\u009C\u00F0\x02\x06\x06\x06\x00\x18\u00EF\fO\u0083\b\u00CC\u00FD\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'orange', label: str.t('Оранжевый', 'Orange'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00=IDAT\x18\u0095c\u00FC\u00D2\u00A1\u00FA\u009F\u0081\b\u00C0\x02R\u00C2$\u00C8\u008DW\u00E5\u00BF\u00F7_!\nA\u0080\u0091\u0097\x03\u00AB\u00A2\u00FF\u009F\x7F\u0080i&b\u00AC\x1D*\n\u00E1\u00BE\u0086\u00F9\x0E\u00AFBP8\u00E1\x05\f\f\f\x00\u00D6!\x0E\u0088\x06d\u00F3\x07\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'yellowColor', label: str.t('Жёлтый', 'Yellow'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00;IDAT\x18\u0095c\u00FCp@\u00ED?\x03\x11\u0080\x05\u00A4\u0084\u0089\u0093\x1B\u00AF\u00CA\x7F\u00DF\u00BFB\x14\u0082\x15\u00B3s`W\u00F4\u00F3\x07D\u009E\x18k\u0087\u008AB\u00B8\u00AFa\u00BE\u00C3\u00AB\x10\x14Nx\x01\x03\x03\x03\x00+\u00AA\x0E\u00CA*\u0090\u00C3\u00A2\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'grain', label: str.t('Зелёный', 'Green'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00=IDAT\x18\u0095c\u00F4\u00DEo\u00F8\u009F\u0081\b\u00C0\x02R\"\u00C6\u00C9\u008FW\u00E5\u00AB\u00EF\x1F!\nA@\u0090\u009D\x1B\u00AB\u00A2\u00F7?\u00BF\u0082i&b\u00AC\x1D*\n\u00E1\u00BE\u0086\u00F9\x0E\u00AFBP8\u00E1\x05\f\f\f\x000\x1F\x0E\x05z4V\u0094\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'blue', label: str.t('Синий', 'Blue'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00=IDAT\x18\u0095c4\u0099\u00F7\u00E1?\x03\x11\u0080\x05\u00A4D\u0080\u009F\t\u00AF\u00CA\x0F\x1F\u00FFA\x14\u0082\x007\x17v\u00C5_\u00BF\u00FD\x03\u00D3\u00F8\u008DB\x02CA!\u00DC\u00D70\u00DF\u00E1U\b\n'\u00BC\u0080\u0081\u0081\x01\x00\b\u00DD\x0E\u00A5\x7F\u00E7e\u008B\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'violet', label: str.t('Фиолетовый', 'Violet'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00=IDAT\x18\u0095c\u00DC\x1Fv\u00FD?\x03\x11\u0080\x05\u00A4\u0084S\u0092\r\u00AF\u00CA\u00EF\u00CF\x7FA\x14\u0082\x00\u00BB\x10\x0BVE?\u00DF\u00FD\x01\u00D3L\u00C4X;T\x14\u00C2\u00BD\n\u00F3\x1D^\u0085\u00A0p\u00C2\x0B\x18\x18\x18\x00KM\x0E\u00C2\u00AA\x19\u00A8d\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'gray', label: str.t('Серый', 'Gray'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00=IDAT\x18\u0095clk\u00EB\u00FC\u00CF@\x04`\x01)\x11\x12\x12\u00C4\u00AB\u00F2\u00DD\u00BB\u00F7\x10\u0085 \u00C0\u00CB\u00CB\u008BU\u00D1\u00E7\u00CF\u009F\u00C14\x131\u00D6\x0E\x15\u0085p_\u00C3|\u0087W!(\u009C\u00F0\x02\x06\x06\x06\x00\u00BE\u00A9\x0ET.#\u00D2&\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'magenta', label: str.t('Пурпурный', 'Magenta'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00\tpHYs\x00\x00\x0B\x13\x00\x00\x0B\x13\x01\x00\u009A\u009C\x18\x00\x00\x00DIDAT\x18\u0095c\u00EC\u0095w\u00FA\u00CF@\x04`a```\x10\u00E4\x14\u00C6\u00AB\u00E8\u00FD\u00F7\u00B7\x10\u0085\f\f\f\f<\u00EC\u00FCX\x15}\u00F9\u00F9\u0091\u0081\u0081\u0081\u0081\u0081\u0089\x18k\u0087\u008AB\u00B8\u00AFa\u00BE\u00C3\u00AB\u00F0\u00FD\u00F7\u00B7\x04M\x04\x00\u00B5\u00CE\r\u00BAV\u009F\u00F8\u00CD\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'fuchsia', label: str.t('Фуксия', 'Fuchsia'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00\tpHYs\x00\x00\x0B\x13\x00\x00\x0B\x13\x01\x00\u009A\u009C\x18\x00\x00\x00DIDAT\x18\u0095c\u008C\u0095\u0088\u00FB\u00CF@\x04`a```\x10\u00E7\u0090\u00C0\u00AB\u00E8\u00E5\u008F\x17\x10\u0085\f\f\f\fB\u00AC\u0082X\x15\u00BD\u00FB\u00FD\u009E\u0081\u0081\u0081\u0081\u0081\u0089\x18k\u0087\u008AB\u00B8\u00AFa\u00BE\u00C3\u00AB\u00F0\u00E5\u008F\x17\x04M\x04\x00\u00897\r\u008F\u00D9\u0098\u0090\u009F\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'seafoam', label: str.t('Морская пена', 'Seafoam'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x03\x00\x00\x00\u00BA\u00EC?\u008F\x00\x00\x00\x12PLTE\x00\x00\x00\u00FF\u00FF\u00FF\x00fb\x00WT\x00CA\u00FF\u00FF\u00FF'Q\x10A\x00\x00\x00\x06tRNS\u00FF\u00FF\u00FF\u00FF\u00FF\x00\u00B3\u00BF\u00A4\u00BF\x00\x00\x00\tpHYs\x00\x00\x0B\x13\x00\x00\x0B\x13\x01\x00\u009A\u009C\x18\x00\x00\x00%IDAT\b\u0099cda\u0080\x01\x16\u0086\u00FFP\x16#\x0B\x03\u0094\u00CD\u00C8\u00C0\x04\u0097'\u0089\u00C9\u00C2\u00C0\u00C0\bg\u00C2X\f\x00\u00BE4\x02\"/\u0092wL\x00\x00\x00\x00IEND\u00AEB`\u0082" },
+        { value: 'indigo', label: str.t('Индиго', 'Indigo'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x03\x00\x00\x00\u00BA\u00EC?\u008F\x00\x00\x00\x12PLTE\x00\x00\x00\u00FF\u00FF\u00FFFI\u00A0<>\u0092.0\u0080\u00FF\u00FF\u00FFth\u00F2\x01\x00\x00\x00\x06tRNS\u00FF\u00FF\u00FF\u00FF\u00FF\x00\u00B3\u00BF\u00A4\u00BF\x00\x00\x00\tpHYs\x00\x00\x0B\x13\x00\x00\x0B\x13\x01\x00\u009A\u009C\x18\x00\x00\x00%IDAT\b\u0099cda\u0080\x01\x16\u0086\u00FFP\x16#\x0B\x03\u0094\u00CD\u00C8\u00C0\x04\u0097'\u0089\u00C9\u00C2\u00C0\u00C0\bg\u00C2X\f\x00\u00BE4\x02\"/\u0092wL\x00\x00\x00\x00IEND\u00AEB`\u0082" }
+    ];
+}
+
+function normalizePriorityLabel(value) {
+    var token = String(value || 'off'), allowed = 'off|none|red|orange|yellowColor|grain|blue|violet|gray|magenta|fuchsia|seafoam|indigo'.split('|');
+    for (var i = 0; i < allowed.length; i++) if (token == allowed[i]) return token;
+    return 'off';
+}
+
+function populatePriorityDropdown(control, value) {
+    var labels = getPriorityLabels(), selected = normalizePriorityLabel(value);
+    for (var i = 0; i < labels.length; i++) {
+        var item = control.add('item', labels[i].label);
+        item.priorityLabel = labels[i].value;
+        if (labels[i].icon) try { item.image = labels[i].icon; } catch (iconError) { }
+        if (labels[i].value == selected) control.selection = item;
+    }
+}
+
+function priorityDropdownValue(control) {
+    return normalizePriorityLabel(control.selection ? control.selection.priorityLabel : 'off');
+}
+
+function validatePrioritySettings() {
+    var first = normalizePriorityLabel(cfg.priorityStartLabel), last = normalizePriorityLabel(cfg.priorityEndLabel);
+    if (first != 'off' && first == last)
+        throw new Error(str.t('Выберите разные метки для начала и конца листа.', 'Choose different labels for the beginning and end of the sheet.'));
+}
+
+function readLayerColorLabel(descriptor) {
+    if (!descriptor.hasKey(s2t('color'))) return 'none';
+    return String(typeIDToStringID(descriptor.getEnumerationValue(s2t('color'))));
+}
+
+function priorityForLabel(label) {
+    // Unknown future Photoshop labels remain ordinary, never become "unlabeled".
+    var first = normalizePriorityLabel(cfg.priorityStartLabel), last = normalizePriorityLabel(cfg.priorityEndLabel);
+    if (first != 'off' && String(label || 'none') == first) return 0;
+    if (last != 'off' && String(label || 'none') == last) return 2;
+    return 1;
+}
+
+function priorityForRoots(roots) {
+    var result = 1;
+    for (var i = 0; i < roots.length; i++) {
+        var rank = priorityForLabel(roots[i].colorLabel);
+        if (rank == 1) continue;
+        if (result != 1 && result != rank)
+            throw new Error(str.t('Связанный набор имеет метки и начала, и конца листа. Измените метки корневых слоёв набора.', 'A linked set has both beginning and end labels. Change its root layer labels.'));
+        result = rank;
+    }
+    return result;
+}
+
+function getItemPriority(item) { return item.priority === 0 ? 0 : item.priority === 2 ? 2 : 1; }
+
+function assignLabelPriorities(items) {
+    var indexed = [], output = [], i;
+    for (i = 0; i < items.length; i++) {
+        if (items[i].priority == undefined) items[i].priority = priorityForLabel(items[i].colorLabel);
+        indexed.push({ item: items[i], index: i });
+    }
+    indexed.sort(function (a, b) { return (getItemPriority(a.item) - getItemPriority(b.item)) || (a.index - b.index); });
+    for (i = 0; i < indexed.length; i++) output.push(indexed[i].item);
+    return output;
+}
+
+function priorityOrderValid(rows) {
+    var previous = 0;
+    for (var r = 0; r < rows.length; r++) for (var c = 0; c < rows[r].length; c++) {
+        var rank = getItemPriority(rows[r][c]);
+        if (rank < previous) return false;
+        previous = rank;
+    }
+    return true;
+}
 
 function normalizeAlphabetOrder(value) {
     var v = String(value || 'off');
@@ -2262,6 +2384,8 @@ function prepareAlphabeticalKeys(items) {
 
 function sortAlphabeticalItems(items) {
     return items.slice(0).sort(function (a, b) {
+        var priority = getItemPriority(a) - getItemPriority(b);
+        if (priority) return priority;
         if (a.alphabetNamed != b.alphabetNamed) return a.alphabetNamed ? -1 : 1;
         if (a.alphabetKey < b.alphabetKey) return -1;
         if (a.alphabetKey > b.alphabetKey) return 1;
@@ -2460,7 +2584,7 @@ function analyzeSemantics(items) {
     return {
         gender: cfg.alternateGender ? finalizeGenderSummary(items, !genderReady || pythonFeatures.isDisabled()) : null,
         headTurn: cfg.considerHeadTurn ? finalizeHeadTurnSummary(items, !headReady || headTurnFeatures.isDisabled()) : null,
-        color: colorRequested ? finalizeColorSummary(items, !colorReady || colorFeatures.isDisabled()) : null,
+        color: colorRequested ? finalizeColorSummary(items) : null,
         previewHistoryTouched: previewHistoryTouched
     };
 }
@@ -2503,7 +2627,7 @@ function classifyColorOutcome(result) {
     return { failure: Math.abs(sum - 1) > .01, reason: 'color_invalid' };
 }
 
-function finalizeColorSummary(items, fallback) {
+function finalizeColorSummary(items) {
     var known = 0;
     for (var i = 0; i < items.length; i++) if (items[i].colorPalette) known++;
     return { known: known, unknown: items.length - known, fallbackToGeometry: known < 2,
@@ -2595,7 +2719,7 @@ function colorAssignmentCost(plan, mode, distances) {
 }
 
 
-function betterColorOrder(plan, cost, best, bestCost, mode) {
+function betterColorOrder(cost, bestCost) {
     return cost < bestCost - 1e-8;
 }
 
@@ -2655,7 +2779,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
             for (cc = 0; cc < plan.rows[rr].items.length; cc++) {
                 var seedItem = plan.rows[rr].items[cc];
                 if (!seedItem.colorPalette) continue;
-                var bucket = useGender ? String(seedItem.gender) : 'all';
+                var bucket = getItemPriority(seedItem) + '|' + (useGender ? String(seedItem.gender) : 'all');
                 if (!pools[bucket]) { pools[bucket] = []; locations[bucket] = []; }
                 pools[bucket].push(seedItem); locations[bucket].push({ row: rr, col: cc });
             }
@@ -2676,7 +2800,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
         if (seeded) {
             var seedScore = getSemanticAssignmentScore(seeded, geometry, useGender, useHead), seedCost = colorAssignmentCost(seeded, mode, distances);
             if (colorSemanticsCompatible(seedScore, baseline) &&
-                (!useHead || colorPoseCompatible(seeded, plan, geometry, poseContext)) && betterColorOrder(seeded, seedCost, best, bestCost, mode)) {
+                (!useHead || colorPoseCompatible(seeded, plan, geometry, poseContext)) && betterColorOrder(seedCost, bestCost)) {
                 best = seeded; bestCost = seedCost;
             }
         }
@@ -2694,6 +2818,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
           for (var pairIndex = 0; pairIndex < (slots.length > 80 ? partnerCount : search.length - a - 1); pairIndex++) {
             var b = slots.length > 80 ? (a + 1 + (Math.floor(pairIndex * (slots.length - 1) / partnerCount) + pass) % (slots.length - 1)) % slots.length : a + 1 + pairIndex;
             var sa = search[a], sb = search[b], ia = best.rows[sa.row].items[sa.col], ib = best.rows[sb.row].items[sb.col];
+            if (getItemPriority(ia) != getItemPriority(ib)) continue;
             if (!ia.colorPalette || !ib.colorPalette || (useGender && ia.gender != ib.gender)) continue;
             var pairKey = Math.min(ia.id, ib.id) + ':' + Math.max(ia.id, ib.id);
             if (distances[pairKey] == undefined) distances[pairKey] = paletteDistance(ia.colorPalette, ib.colorPalette);
@@ -2707,7 +2832,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
             if (!colorSemanticsCompatible(score, baseline) ||
                 (useHead && !colorPoseCompatible(candidate, plan, geometry, poseContext))) continue;
             var cost = colorAssignmentCost(candidate, mode, distances);
-            if (betterColorOrder(candidate, cost, best, bestCost, mode)) { best = candidate; bestCost = cost; changed = true; }
+            if (betterColorOrder(cost, bestCost)) { best = candidate; bestCost = cost; changed = true; }
         }
         }
         if (!changed) break;
@@ -2994,6 +3119,7 @@ function cleanupPreviews() {
 // Assign children to a valid geometric skeleton, then reflow the SAME row count,
 // scale and gaps. This permits useful cross-row swaps of different-size photos.
 function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
+    if (!priorityOrderValid(itemRows)) return null;
     var specs = [], fixed = { minFinalGapX: plan.minFinalGapX, actualGapX: plan.actualGapXMin,
         actualGapXMin: plan.actualGapXMin, actualGapXMax: plan.actualGapXMax, byRow: {} }, r, c;
     for (r = 0; r < itemRows.length; r++) {
@@ -3051,8 +3177,8 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
         if (!placeRangeVerticalGroup(specs, indices, plan.commonScale, plan.actualGapY, geometry.bounds.top, geometry.bounds.bottom)) return null;
     }
     var metadata = {};
-    copyDefinedPlanMetadata(metadata, plan, ['scaleX', 'scaleY', 'fitDifference', 'rhythmPenalty',
-        'shapedSelection', 'multiZoneSelection', 'zoneCount', 'usedZoneCount', 'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics', 'pythonComposition', 'compositionReferenceScale', 'compositionScaleLoss', 'compositionEvaluated', 'compositionColorCost']);
+    copyDefinedPlanMetadata(metadata, plan, ['scaleX', 'scaleY', 'fitDifference', 'rhythmPenalty']);
+    copyLayoutMetadata(metadata, plan);
     var semanticFixed = cfg.horizontalAlign == 'justify' ? null : fixed,
         candidate = finalizeLayoutRows(specs, plan.commonScale, plan.baseGapX, plan.baseGapY, plan.actualGapY, metadata, semanticFixed);
     if (!candidate) return null;
@@ -3145,7 +3271,7 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
         for (rr = 0; rr < rows.length; rr++) for (cc = 0; cc < rows[rr].length; cc++) {
             var item = rows[rr][cc];
             if (!item.headTurnValid) continue;
-            var key = (useGender ? item.gender : 'any') + '|' + item.width.toFixed(6) + '|' + item.height.toFixed(6);
+            var key = getItemPriority(item) + '|' + (useGender ? item.gender : 'any') + '|' + item.width.toFixed(6) + '|' + item.height.toFixed(6);
             if (!buckets[key]) buckets[key] = [];
             buckets[key].push({ row: rr, column: cc, item: item, x: position[String(item.id)] });
         }
@@ -3233,6 +3359,7 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
             if ((a % 8) == 0) layoutUnitProgress(pass + a / Math.max(1, searchSlots.length), 12, 'Gender and pose: pass ' + (pass + 1) + ', positions ' + a + '/' + searchSlots.length);
             for (var b = a + 1; b < searchSlots.length; b++) {
                 var sa = searchSlots[a], sb = searchSlots[b], ai = baseRows[sa.row][sa.column], bi = baseRows[sb.row][sb.column];
+                if (getItemPriority(ai) != getItemPriority(bi)) continue;
                 var genderChange = useGender && ai.gender != bi.gender,
                     poseChange = useHead && ai.headTurnValid && bi.headTurnValid && (ai.headTurn != bi.headTurn ||
                         (ai.headLeanValid ? ai.headLeanWeight * ai.headLean : 0) != (bi.headLeanValid ? bi.headLeanWeight * bi.headLean : 0));
@@ -3269,9 +3396,6 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
     return best;
 }
 
-function reorderPlanForHeadTurn(plan, geometry, preserveGender) {
-    return optimizeSemanticAssignment(plan, geometry, preserveGender, true);
-}
 
 function buildGenderAwareLayoutPlan(items, geometry) {
     // Geometry stays authoritative. First discover the geometric row distribution,
@@ -3323,6 +3447,25 @@ function buildGenderAwareLayoutPlan(items, geometry) {
 
 
 function reorderItemsForGenderCheckerboard(items, distribution) {
+    // Split only at category boundaries, retaining the real row intersections.
+    if (!items.length || getItemPriority(items[0]) == getItemPriority(items[items.length - 1]))
+        return reorderGenderPool(items, distribution);
+    var result = [], start = 0, rowStart, i, end, counts;
+    while (start < items.length) {
+        end = start + 1;
+        while (end < items.length && getItemPriority(items[end]) == getItemPriority(items[start])) end++;
+        counts = []; rowStart = 0;
+        for (i = 0; i < distribution.length; i++) {
+            var overlap = Math.min(end, rowStart + distribution[i]) - Math.max(start, rowStart);
+            if (overlap > 0) counts.push(overlap);
+            rowStart += distribution[i];
+        }
+        result = result.concat(reorderGenderPool(items.slice(start, end), counts)); start = end;
+    }
+    return result;
+}
+
+function reorderGenderPool(items, distribution) {
     var male = [], female = [], unknown = [], i;
     for (i = 0; i < items.length; i++) {
         if (items[i].gender == 'M') male.push(items[i]);
@@ -3942,7 +4085,7 @@ function buildRectangularLayoutCandidate(items, geometry, distribution, baseGapX
 
     var scaleX = geometry.bounds.width / maxMinRowWidth,
         scaleY = geometry.bounds.height / minLayoutHeight,
-        commonScale = Math.min(scaleX, scaleY);
+        commonScale = Math.min(scaleX, scaleY, cfg.noEnlarge ? 1 : Infinity);
 
     if (!isFinite(commonScale) || commonScale <= 0) return null;
 
@@ -4133,12 +4276,20 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
 
     if (lockedLayoutActive()) {
         if (Math.abs(commonScale - lockedRuntimeScale()) > 1e-9) throw new Error(str.t('Изменился масштаб, зафиксированный в экшене.', 'The scale locked in the action has changed.'));
-        fixedGapPolicy = lockedGapPolicy(rowSpecs, actionLayoutProfile, baseGapX);
+        fixedGapPolicy = lockedGapPolicy(rowSpecs, actionLayoutProfile);
         if (!fixedGapPolicy) return null;
     }
     var gapPolicy = fixedGapPolicy || resolveHorizontalGapPolicy(rowSpecs, commonScale, baseGapX);
     if (!gapPolicy) return null;
 
+    var blockWidths = {}, rowWidths = [];
+    for (var bi = 0; bi < rowSpecs.length; bi++) {
+        var bs = rowSpecs[bi], bn = bs.items.length,
+            bw = bs.contentWidth * commonScale + getHorizontalGapForRow(gapPolicy, bn, bi) * Math.max(0, bn - 1),
+            bk = horizontalBlockKey(bs);
+        rowWidths[bi] = bw;
+        if (blockWidths[bk] == undefined || bw > blockWidths[bk]) blockWidths[bk] = bw;
+    }
     var rows = [],
         placements = [],
         distribution = [],
@@ -4150,10 +4301,9 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
         var spec = rowSpecs[r],
             count = spec.items.length,
             rowGapX = getHorizontalGapForRow(gapPolicy, count, r),
-            scaledContentWidth = spec.contentWidth * commonScale,
-            finalRowWidth = scaledContentWidth + rowGapX * Math.max(0, count - 1),
+            finalRowWidth = rowWidths[r],
             finalRowHeight = spec.rowHeight * commonScale,
-            x = alignRowLeft(spec.interval, finalRowWidth, count);
+            x = alignRowLeft(spec.interval, finalRowWidth, count, blockWidths[horizontalBlockKey(spec)]);
 
         if (x == null) return null;
 
@@ -4232,10 +4382,7 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
         perRowJustifyGaps: cfg.horizontalAlign == 'justify'
     };
 
-    copyDefinedPlanMetadata(plan, metadata, [
-        'shapedSelection', 'multiZoneSelection', 'zoneCount', 'usedZoneCount',
-        'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics', 'pythonComposition', 'compositionReferenceScale', 'compositionScaleLoss', 'compositionEvaluated', 'compositionColorCost'
-    ]);
+    copyLayoutMetadata(plan, metadata);
     return plan;
 }
 
@@ -4302,14 +4449,24 @@ function getHorizontalGapForRow(policy, count, rowIndex) {
     return policy.actualGapX;
 }
 
-function alignRowLeft(interval, rowWidth, count) {
+function horizontalBlockKey(spec) {
+    // Never center across distinct zones or across different safe spans of a cut-out.
+    return String(spec.componentIndex == undefined ? '' : spec.componentIndex) + '|' +
+        String(spec.zoneIndex == undefined ? '' : spec.zoneIndex) + '|' + spec.interval.left + '|' + spec.interval.right;
+}
+
+function alignRowLeft(interval, rowWidth, count, blockWidth) {
     var intervalWidth = interval.right - interval.left,
         freeX = intervalWidth - rowWidth;
     if (freeX < -FIT_EPS) return null;
 
+    // Gap policy already used the largest common legal gap. Any slack left
+    // around the widest row cannot be filled without changing scale/gaps.
+    var blockSlack = Math.max(0, intervalWidth - (blockWidth == undefined ? rowWidth : blockWidth)),
+        inset = blockSlack / 2;
     switch (cfg.horizontalAlign) {
-        case 'left': return interval.left;
-        case 'right': return interval.right - rowWidth;
+        case 'left': return interval.left + inset;
+        case 'right': return interval.right - inset - rowWidth;
         case 'justify':
             // With 2+ photos Justify is a hard invariant: the row reaches both edges.
             // A one-photo row has no inter-photo gap to stretch and is centered.
@@ -4318,6 +4475,13 @@ function alignRowLeft(interval, rowWidth, count) {
         default:
             return interval.left + freeX / 2;
     }
+}
+
+function copyLayoutMetadata(target, source) {
+    copyDefinedPlanMetadata(target, source, [
+        'shapedSelection', 'multiZoneSelection', 'zoneCount', 'usedZoneCount',
+        'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics', 'pythonComposition', 'compositionReferenceScale', 'compositionScaleLoss', 'compositionEvaluated', 'compositionColorCost'
+    ]);
 }
 
 function copyDefinedPlanMetadata(target, source, keys) {
@@ -4414,7 +4578,7 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
             zones = flattenComponentZones(geometry.components);
         }
         for (i = 0; i < items.length; i++) {
-            var item = items[i], entry = { id: item.id, width: item.width, height: item.height };
+            var item = items[i], entry = { id: item.id, width: item.width, height: item.height, priority: getItemPriority(item) };
             if (composition) {
                 entry.gender = item.gender || 'U';
                 entry.headTurnValid = !!item.headTurnValid; entry.headTurn = item.headTurnValid ? item.headTurn : 0;
@@ -4431,7 +4595,7 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
         var payload = { items: data, zones: zoneData,
             baseGapX: baseGapX, baseGapY: baseGapY, maxGapMultiplier: cfg.maxGapMultiplier,
             horizontalAlign: cfg.horizontalAlign, rowRhythm: cfg.rowRhythm,
-            rows: cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)) };
+            rows: cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)), noEnlarge: !!cfg.noEnlarge };
         if (composition) {
             payload.useGender = !!cfg.alternateGender; payload.useHead = !!cfg.considerHeadTurn;
             payload.colorMode = normalizeColorMode(cfg.colorMode);
@@ -4485,6 +4649,9 @@ function decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGa
         if (!numeric(zi) || zi != Math.floor(zi) || zi < 0 || zi >= zones.length ||
             !row.ids || !row.ids.length || row.ids.length > items.length || !numeric(row.top))
             throw new Error(str.t('Некорректный ряд Python.', 'Invalid row returned by Python.'));
+        if (r && (zi < answer.rows[r - 1].zoneIndex ||
+            (zi == answer.rows[r - 1].zoneIndex && row.top < answer.rows[r - 1].top)))
+            throw new Error(str.t('Python изменил порядок чтения зон или рядов.', 'Python changed the zone or row reading order.'));
         var zone = zones[zi], rowItems = [], width = 0, height = 0;
         for (i = 0; i < row.ids.length; i++) {
             var id = String(row.ids[i]), item = byId[id];
@@ -4621,7 +4788,7 @@ function buildMultiZoneLayoutFast(items, geometry, baseGapX, baseGapY) {
 
     var scaleX = maxIntervalWidth / maxItemWidth,
         scaleY = maxZoneHeight / maxItemHeight,
-        high = Math.min(scaleX, scaleY),
+        high = Math.min(scaleX, scaleY, cfg.noEnlarge ? 1 : Infinity),
         low = 0,
         iterations = 14,
         desiredRows = cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)),
@@ -4629,6 +4796,8 @@ function buildMultiZoneLayoutFast(items, geometry, baseGapX, baseGapY) {
         componentCount = geometry.componentCount || 1;
 
     if (!isFinite(high) || high <= 0) return null;
+
+    if (cfg.noEnlarge && findMultiZoneAllocation(items, zones, 1, baseGapX, baseGapY, cache, desiredRows, componentCount)) { low = 1; iterations = 0; }
 
     for (var pass = 0; pass < iterations; pass++) {
         var scale = (low + high) / 2;
@@ -4749,7 +4918,7 @@ function findMultiZoneAllocation(items, zones, scale, baseGapX, baseGapY, cache,
             var capacities = [],
                 totalCapacity = 0;
             for (var rz = z; rz < zones.length; rz++) {
-                var futureInfo = getZonePackingInfo(items, state.itemIndex, maxItems, zones[rz], scale,
+                var futureInfo = getZonePackingInfo(state.itemIndex, maxItems, zones[rz], scale,
                     minGapX, minGapY, cache, packingCache);
                 capacities[rz] = futureInfo.capacity;
                 totalCapacity += futureInfo.capacity;
@@ -4772,7 +4941,7 @@ function findMultiZoneAllocation(items, zones, scale, baseGapX, baseGapY, cache,
 
             if (!maxItems || currentCapacity <= 0) continue;
 
-            var info = getZonePackingInfo(items, state.itemIndex, maxItems, zone, scale,
+            var info = getZonePackingInfo(state.itemIndex, maxItems, zone, scale,
                     minGapX, minGapY, cache, packingCache),
                 options = info.options;
 
@@ -4840,12 +5009,12 @@ function findMultiZoneAllocation(items, zones, scale, baseGapX, baseGapY, cache,
     return best;
 }
 
-function getZonePackingInfo(items, start, maxItems, zone, scale, minGapX, minGapY, segmentCache, packingCache) {
+function getZonePackingInfo(start, maxItems, zone, scale, minGapX, minGapY, segmentCache, packingCache) {
     var key = zone.zoneIndex + ':' + start + ':' + maxItems,
         cached = packingCache[key];
     if (cached) return cached;
 
-    var options = buildZonePackingOptions(items, start, maxItems, zone, scale, minGapX, minGapY, segmentCache),
+    var options = buildZonePackingOptions(start, maxItems, zone, scale, minGapX, minGapY, segmentCache),
         capacity = 0;
     for (var i = 0; i < options.length; i++)
         if (options[i].count > capacity) capacity = options[i].count;
@@ -4855,7 +5024,7 @@ function getZonePackingInfo(items, start, maxItems, zone, scale, minGapX, minGap
     return cached;
 }
 
-function buildZonePackingOptions(items, start, maxItems, zone, scale, minGapX, minGapY, cache) {
+function buildZonePackingOptions(start, maxItems, zone, scale, minGapX, minGapY, cache) {
     var dp = [],
         options = [],
         consumed, rowsCount, count;
@@ -4960,13 +5129,15 @@ function buildShapedLayoutFast(items, geometry, baseGapX, baseGapY) {
 
     var scaleX = maxIntervalWidth / maxItemWidth,
         scaleY = geometry.bounds.height / maxItemHeight,
-        high = Math.min(scaleX, scaleY),
+        high = Math.min(scaleX, scaleY, cfg.noEnlarge ? 1 : Infinity),
         low = 0,
         iterations = 14,
         desiredRows = cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)),
         bestPath = null;
 
     if (!isFinite(high) || high <= 0) return null;
+
+    if (cfg.noEnlarge && findShapedPlacementFast(items, geometry, 1, baseGapX, baseGapY, cache, desiredRows)) { low = 1; iterations = 0; }
 
     for (var pass = 0; pass < iterations; pass++) {
         var scale = (low + high) / 2;
@@ -5477,6 +5648,13 @@ function getMedianHeight(items) {
 }
 
 function validateLayoutPlan(plan, geometry) {
+    if (plan && plan.rows) {
+        var priorityRows = [];
+        for (var pr = 0; pr < plan.rows.length; pr++) priorityRows.push(plan.rows[pr].items);
+        if (!priorityOrderValid(priorityRows)) throw new Error(str.t('Нарушен порядок приоритетов цветовых меток.', 'Layer label priority order was violated.'));
+    }
+    if (cfg.noEnlarge && plan && plan.commonScale > 1 + 1e-12)
+        throw new Error(str.t('Нарушен запрет увеличения слоёв.', 'Layer enlargement is disabled.'));
     if (!plan || !plan.placements || !plan.placements.length)
         throw new Error(str.t('План раскладки пуст.', 'The layout plan is empty.'))
 
@@ -5562,6 +5740,8 @@ function validateAppliedBounds(expected, actual, name) {
 }
 
 function applyLayoutPlan() {
+    if (cfg.noEnlarge && layoutPlan && layoutPlan.commonScale > 1 + 1e-12)
+        throw new Error(str.t('Увеличение слоёв запрещено.', 'Layer enlargement is disabled.'));
     if (!layoutPlan || !layoutPlan.placements) throw new Error(str.t('Нет рассчитанного LayoutPlan.', 'No calculated LayoutPlan is available.'))
 
     var scale = layoutPlan.commonScale,
@@ -5765,26 +5945,12 @@ function OptionalPythonFeatures(api, failureLimit) {
         }
 
         try {
-            var value = api.sendPayload(type, payload, { longRequest: !!options.photo || (type == 'gender_names' || type == 'alphabet_names') }),
-                outcome = options.classify ? options.classify(value) : { failure: false };
-
-            if (outcome && outcome.failure) {
-                if (options.photo) this.recordPhotoFailure(outcome.reason, outcome.message);
-                else this.recordFailure(outcome.reason, outcome.message);
-                return {
-                    ok: true,
-                    value: value,
-                    analysisFailure: true,
-                    disabled: state.disabled,
-                    reason: outcome.reason || state.reason,
-                    message: outcome.message || state.message
-                };
-            }
+            var value = api.sendPayload(type, payload, { longRequest: !!options.photo || (type == 'gender_names' || type == 'alphabet_names') });
 
             // A valid result, including an explicit low-confidence/unknown result,
             // proves that the optional method is functioning and breaks the streak.
             if (!options.deferSuccess) this.recordSuccess();
-            return { ok: true, value: value, analysisFailure: false, disabled: false };
+            return { ok: true, value: value, disabled: false };
         } catch (e) {
             if (e.number && e.number == 8007) throw e;
             var message = e && e.message ? e.message : String(e);
@@ -5797,10 +5963,10 @@ function OptionalPythonFeatures(api, failureLimit) {
 
 
 // ExtendScript has no guaranteed native JSON.parse. Parse data without executing
-// server text; reject truncated replies, expressions and non-finite numbers.
-function parsePythonJSON(text) {
+// input text; reject truncated replies, expressions and non-finite numbers.
+function parseJSONData(text) {
     var input = String(text), pos = 0, size = input.length;
-    function fail() { throw new Error('Invalid Python JSON response'); }
+    function fail() { throw new Error('Invalid JSON data'); }
     function space() { while (pos < size && /[\x20\t\r\n]/.test(input.charAt(pos))) pos++; }
     function stringValue() {
         var result = '', ch, escaped, hex,
@@ -6096,7 +6262,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             if (!socket.open(apiHost + ':' + portSend, 'UTF-8')) return false;
             socket.writeln(objectToJSON({ type: type, target_id: targetID }));
             if (!waitReply) return true;
-            var result = parsePythonJSON(socket.readln());
+            var result = parseJSONData(socket.readln());
             return result && result.stopped === true;
         } catch (e) { return false; }
         finally { try { socket.close(); } catch (e2) { } }
@@ -6134,7 +6300,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
                 var answer = listener.poll();
                 if (answer) {
                     var parsed = null;
-                    try { answer.timeout = 5; parsed = parsePythonJSON(answer.readln()); }
+                    try { answer.timeout = 5; parsed = parseJSONData(answer.readln()); }
                     catch (parseError) { }
                     finally { answer.close(); }
                     if (parsed && parsed.request_id == o.request_id) {
@@ -6228,8 +6394,7 @@ function AM(target, order) {
         }
         var desc = new AD;
         desc.putObject(s2t('object'), s2t('json'), d);
-        eval('var o = ' + executeAction(s2t('convertJSONdescriptor'), desc).getString(s2t('json')));
-        return o[key];
+        return parseJSONData(executeAction(s2t('convertJSONdescriptor'), desc).getString(s2t('json')))[key];
     };
 
     this.makePathFromSelection = function (tolerance) {
