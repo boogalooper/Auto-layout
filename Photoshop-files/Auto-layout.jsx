@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.33 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.34 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -44,7 +44,7 @@
 
 $.localize = true;
 
-var ver = '0.10.33',
+var ver = '0.10.34',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -5594,8 +5594,10 @@ function getRowRhythmProfile(rows, mode) {
     }
 
     if (mode == 'alternateWide' || mode == 'alternateNarrow') {
-        var wideOnEven = mode == 'alternateWide';
-        for (i = 0; i < rows; i++) out[i] = ((i % 2 == 0) == wideOnEven) ? 1 : 0;
+        var wideOnEven = mode == 'alternateWide', bias = 1 / (4 * rows * rows);
+        // Resolve unavoidable remainder ties in reading order: fill preferred
+        // long rows from the top, and put extra items in short rows from below.
+        for (i = 0; i < rows; i++) out[i] = ((i % 2 == 0) == wideOnEven) ? 1 - i * bias : i * bias;
         return out;
     }
 

@@ -80,7 +80,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.33"
+SERVER_ID = "auto-layout/0.10.34"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -1098,7 +1098,11 @@ def row_rhythm_profile(size, mode):
     if mode == "auto" or size <= 1:
         return [0.0] * size
     if mode in ("alternateWide", "alternateNarrow"):
-        return [float(i % 2 == (0 if mode == "alternateWide" else 1)) for i in range(size)]
+        # Preserve the selected first row. Arithmetic remainder deviations go
+        # to later rows, after filling preferred long rows in reading order.
+        bias = 1 / (4 * size * size)
+        return [1 - i * bias if i % 2 == (0 if mode == "alternateWide" else 1) else i * bias
+                for i in range(size)]
     middle, minimum = (size - 1) / 2, 0 if size % 2 else .5
     span = middle - minimum
     central = [1 - (abs(i - middle) - minimum) / span if span > 0 else 1 for i in range(size)]
