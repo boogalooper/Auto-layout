@@ -80,7 +80,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.23"
+SERVER_ID = "auto-layout/0.10.25"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 
@@ -1422,6 +1422,406 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
                 elapsed=round(time.monotonic() - started, 3))
 
 
+def composition_color_cost(plan, by_id, mode, distances):
+    """Same physical-neighbour graph and weighted Lab energy distance as JSX."""
+    if mode == "off": return 0.0
+    def expected(a, b):
+        return sum(p["weight"] * q["weight"] * math.dist(p["lab"], q["lab"]) for p in a for q in b)
+    def distance(a, b):
+        key = tuple(sorted((a,b)))
+        if key not in distances:
+            p,q=by_id[a]["colorPalette"],by_id[b]["colorPalette"]
+            distances[key] = math.sqrt(max(0.0,2*expected(p,q)-expected(p,p)-expected(q,q)))
+        return distances[key]
+    positions = {p["id"]:p for p in plan["placements"]}
+    physical = []
+    for _,row in sorted(enumerate(plan["rows"]),key=lambda pair:(pair[1]["top"],pair[0])):
+        if not physical or abs(physical[-1][0]-row["top"])>=1:
+            physical.append((row["top"],[]))
+        physical[-1][1].extend(positions[i] for i in row["ids"])
+    for top,entries in physical:entries.sort(key=lambda p:(p["centerX"],by_id[p["id"]]["order"]))
+    total=weight_sum=0.0;seen=set()
+    def edge(a,b,weight):
+        nonlocal total,weight_sum
+        ia,ib=a["id"],b["id"]
+        if not by_id[ia].get("colorPalette") or not by_id[ib].get("colorPalette"):return
+        key=tuple(sorted((ia,ib)))
+        if key in seen:return
+        seen.add(key);total+=weight*distance(ia,ib);weight_sum+=weight
+    for r,(top,entries) in enumerate(physical):
+        for a,b in zip(entries,entries[1:]):edge(a,b,1.0)
+        if r+1>=len(physical):continue
+        below=physical[r+1][1]
+        for a in entries:
+            if below:
+                nearest=min(below,key=lambda b:(b["centerX"]-a["centerX"])**2+(b["centerY"]-a["centerY"])**2)
+                edge(a,nearest,.5)
+    return (-1 if mode=="contrast" else 1)*(total/weight_sum if weight_sum else 0.0)
+
+
+def calculate_composition_layout(payload, state, time_budget=14.0):
+    """Bounded whole-sheet geometry/gender/pose search; never runs image models.
+
+    Geometry is established first. Composition may spend at most 1% of linear
+    scale. Keep complete feasible incumbents so a deadline never loses a plan.
+    """
+    started = time.monotonic()
+    deadline = started + max(0.0, min(20.0, time_budget))
+    # Existing geometry solver validates IDs, dimensions, zones and gap policy.
+    baseline = calculate_zone_layout(payload, state, time_budget=min(8.0, max(0.0, time_budget * .6)))
+    if baseline.get("status") != "ok":
+        return baseline
+    def check():
+        if request_cancelled(state):
+            raise InterruptedError("Composition search cancelled")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Composition search budget exhausted")
+    use_gender, use_head = payload.get("useGender", False), payload.get("useHead", False)
+    if type(use_gender) is not bool or type(use_head) is not bool:
+        raise ValueError("Invalid composition flags")
+    color_mode = payload.get("colorMode", "off")
+    if color_mode not in ("off", "harmonious", "contrast"):
+        raise ValueError("Invalid composition color mode")
+    color_distances = {}
+    by_id = {}
+    for order, source in enumerate(payload["items"]):
+        item = dict(source, order=order)
+        sex = item.get("gender", "U")
+        if sex not in ("M", "F", "U"):
+            raise ValueError("Invalid composition gender")
+        item["gender"] = sex
+        for key in ("headTurnValid", "headLeanValid"):
+            if type(item.get(key, False)) is not bool:
+                raise ValueError("Invalid pose validity flag")
+        for key, limit in (("headTurn", 180), ("headLean", 180), ("headLeanWeight", 1)):
+            value = item.get(key, 0)
+            if type(value) not in (int, float) or not math.isfinite(value) or abs(value) > limit:
+                raise ValueError("Invalid composition pose")
+            item[key] = float(value)
+        palette = item.get("colorPalette")
+        if palette is not None:
+            if not isinstance(palette,list) or not 1 <= len(palette) <= 4:
+                raise ValueError("Invalid clothing palette")
+            weight_sum = 0.0
+            for swatch in palette:
+                if not isinstance(swatch,dict): raise ValueError("Invalid clothing swatch")
+                lab,weight=swatch.get("lab"),swatch.get("weight")
+                if (not isinstance(lab,list) or len(lab)!=3 or type(weight) not in (int,float)
+                        or not math.isfinite(weight) or not 0<weight<=1):
+                    raise ValueError("Invalid clothing palette values")
+                for channel,value in enumerate(lab):
+                    if (type(value) not in (int,float) or not math.isfinite(value)
+                            or (not 0<=value<=100 if channel==0 else abs(value)>128)):
+                        raise ValueError("Invalid clothing Lab value")
+                weight_sum+=weight
+            if abs(weight_sum-1)>.01:raise ValueError("Invalid clothing palette weights")
+        item["colorPalette"] = palette
+        by_id[item["id"]] = item
+    zones = payload["zones"]
+    gx, gy = float(payload.get("baseGapX", 0)), float(payload.get("baseGapY", 0))
+    multiplier = float(payload.get("maxGapMultiplier", 3))
+    align, desired = payload.get("horizontalAlign", "center"), payload.get("rows", 0)
+    rhythm = payload.get("rowRhythm", "auto")
+    n = len(by_id)
+    center = (min(z["left"] for z in zones) + max(z["right"] for z in zones)) / 2
+    half = max(1.0, (max(z["right"] for z in zones) - min(z["left"] for z in zones)) / 2)
+    def reflow(rows, cap=math.inf):
+        if not rows or (desired and len(rows) != desired): return None
+        ids = [id_ for zi, row in rows for id_ in row]
+        if len(ids) != n or set(ids) != set(by_id): return None
+        groups = {}
+        scale = cap
+        for zi, row in rows:
+            if type(zi) is not int or not 0 <= zi < len(zones) or not row: return None
+            groups.setdefault(zi, []).append(row)
+            z = zones[zi]
+            scale = min(scale, (z["right"] - z["left"]) / (sum(by_id[i]["width"] for i in row) + gx * (len(row) - 1)))
+        used_components = {zones[zi]["componentIndex"] for zi in groups}
+        components = {z["componentIndex"] for z in zones}
+        if n >= len(components) and used_components != components: return None
+        for zi, group in groups.items():
+            z = zones[zi]
+            scale = min(scale, (z["bottom"] - z["top"]) / (sum(max(by_id[i]["height"] for i in row) for row in group) + gy * (len(group) - 1)))
+        if not math.isfinite(scale) or scale <= 0: return None
+        scale = math.nextafter(scale, 0.0)
+        gap_y = gy * scale * multiplier
+        for zi, group in groups.items():
+            if len(group) > 1:
+                z = zones[zi]
+                gap_y = min(gap_y, (z["bottom"] - z["top"] - sum(max(by_id[i]["height"] for i in row) for row in group) * scale) / (len(group) - 1))
+        has_vertical = any(len(group) > 1 for group in groups.values())
+        gap_y = max(gy * scale, gap_y) if has_vertical else 0.0
+        gap_x = gx * scale * multiplier
+        if align != "justify":
+            for zi, row in rows:
+                if len(row) > 1:
+                    z = zones[zi]
+                    gap_x = min(gap_x, (z["right"] - z["left"] - sum(by_id[i]["width"] for i in row) * scale) / (len(row) - 1))
+            gap_x = max(gx * scale, gap_x)
+        tops = {}
+        for zi, group in groups.items():
+            z = zones[zi]
+            height = sum(max(by_id[i]["height"] for i in row) for row in group) * scale + (len(group) - 1) * gap_y
+            tops[zi] = z["top"] + (z["bottom"] - z["top"] - height) / 2
+        row_specs, placements = [], []
+        for zi, row in rows:
+            z = zones[zi]; width = sum(by_id[i]["width"] for i in row)
+            height = max(by_id[i]["height"] for i in row)
+            gap = (z["right"] - z["left"] - width * scale) / (len(row) - 1) if align == "justify" and len(row) > 1 else gap_x if len(row) > 1 else 0.0
+            final_width = width * scale + gap * (len(row) - 1)
+            x = z["left"] if align == "left" or (align == "justify" and len(row) > 1) else z["right"] - final_width if align == "right" else z["left"] + (z["right"] - z["left"] - final_width) / 2
+            top = tops[zi]
+            row_specs.append(dict(zoneIndex=zi, ids=list(row), top=top, gapX=gap, contentWidth=width, rowHeight=height))
+            for id_ in row:
+                item = by_id[id_]
+                placements.append(dict(id=id_, centerX=x + item["width"] * scale / 2, centerY=top + item["height"] * scale / 2, scale=scale))
+                x += item["width"] * scale + gap
+            tops[zi] += height * scale + gap_y
+        return dict(status="ok", commonScale=scale, gapY=gap_y, rows=row_specs, placements=placements)
+    def score(plan):
+        positions = {p["id"]: p["centerX"] for p in plan["placements"]}
+        bad = good = symmetry = vertical = 0
+        minority_center = head = 0.0
+        previous = []
+        counts = []
+        for row in plan["rows"]:
+            ids = row["ids"]; counts.append(len(ids))
+            sexes = [by_id[i]["gender"] for i in ids]
+            if use_gender:
+                for a, b in zip(sexes, sexes[1:]):
+                    if a != "U" and b != "U":
+                        bad += a == b; good += a != b
+                m, f = sexes.count("M"), sexes.count("F")
+                if m and f and abs(m - f) > 1:
+                    symmetry += sum(a != b for a, b in zip(sexes[:len(sexes)//2], reversed(sexes)))
+                    minority = "M" if m < f else "F"
+                    local_center = (positions[ids[0]] - by_id[ids[0]]["width"] * plan["commonScale"] / 2 + positions[ids[-1]] + by_id[ids[-1]]["width"] * plan["commonScale"] / 2) / 2
+                    pitch = max(1e-7, (positions[ids[-1]] - positions[ids[0]]) / (len(ids) - 1))
+                    minority_center += sum(((positions[i] - local_center) / pitch) ** 2 for i in ids if by_id[i]["gender"] == minority)
+                for a, b in zip(sexes, previous):
+                    if a != "U" and b != "U": vertical += 1 if a != b else -1
+            if use_head:
+                prev_turn = None
+                for id_ in ids:
+                    item = by_id[id_]
+                    if not item.get("headTurnValid", False): prev_turn = None; continue
+                    turn, target = item["headTurn"] / 80, (center - positions[id_]) / half
+                    head += (turn - target) ** 2
+                    if prev_turn is not None: head += .35 * max(0, turn - prev_turn) ** 2
+                    if item.get("headLeanValid", False): head += .15 * item["headLeanWeight"] * (item["headLean"] / 30 - target) ** 2
+                    prev_turn = turn
+            previous = sexes
+        # Row rhythm and balance resolve equal semantic scores, after geometry.
+        balance = sum((c - n / len(counts)) ** 2 for c in counts)
+        rhythm_cost = 0.0
+        if rhythm != "auto" and len(counts) > 1 and max(counts) != min(counts):
+            lo, span = min(counts), max(counts) - min(counts)
+            middle = (len(counts) - 1) / 2
+            denominator = middle - (0 if len(counts) % 2 else .5)
+            for index, count in enumerate(counts):
+                central = 1 - (abs(index - middle) - (0 if len(counts) % 2 else .5)) / denominator if denominator > 0 else 1
+                target = central if rhythm == "centerWide" else 1 - central if rhythm == "edgesWide" else float(index % 2 == (0 if rhythm == "alternateWide" else 1))
+                rhythm_cost += ((count - lo) / span - target) ** 2
+        return (bad, bad - good, symmetry, round(minority_center, 8), -vertical, round(head, 9), round(composition_color_cost(plan,by_id,color_mode,color_distances),9), -plan["commonScale"], rhythm_cost, balance)
+    def score_key(plan):
+        if "_score" not in plan: plan["_score"] = score(plan)
+        return plan["_score"]
+    @lru_cache(maxsize=2048)
+    def tokens(m, f):
+        size = m + f
+        if abs(m - f) <= 1:
+            start = "M" if m >= f else "F"
+            return tuple(start if i % 2 == 0 else ("F" if start == "M" else "M") for i in range(size))
+        small, minority = min(m, f), "M" if m < f else "F"
+        majority = "F" if minority == "M" else "M"
+        @lru_cache(maxsize=None)
+        def rec(depth, left, outer_l, outer_r):
+            check()
+            length = size - 2 * depth
+            if left < 0 or left > length: return None
+            if length == 0: return (int(outer_l == outer_r), 0, 0.0, ())
+            if length == 1:
+                t = minority if left else majority
+                return (int(outer_l == t) + int(outer_r == t), 0, 0.0, (t,))
+            best = None
+            for a, b in itertools.product((0, 1), repeat=2):
+                l, r = minority if a else majority, minority if b else majority
+                inner = rec(depth + 1, left - a - b, l, r)
+                if inner is None: continue
+                value = (inner[0] + int(outer_l == l) + int(outer_r == r), inner[1] + int(l != r), inner[2] + (a + b) * ((size - 1) / 2 - depth) ** 2, (l,) + inner[3] + (r,))
+                if best is None or value[:3] < best[:3]: best = value
+            return best
+        return rec(0, small, "", "")[3]
+    @lru_cache(maxsize=128)
+    def gender_templates(counts):
+        male = sum(i["gender"] == "M" for i in by_id.values())
+        female = sum(i["gender"] == "F" for i in by_id.values())
+        if male + female != n:
+            # Unknowns remain neutral. The swap search can improve this seed.
+            pool = {s: sum(i["gender"] == s for i in by_id.values()) for s in ("M", "F", "U")}
+            result = []
+            for r, count in enumerate(counts):
+                row = []
+                for c in range(count):
+                    wanted = "M" if (r + c) % 2 == 0 else "F"
+                    sex = wanted if pool[wanted] else "U" if pool["U"] else "F" if pool["F"] else "M"
+                    row.append(sex); pool[sex] -= 1
+                result.append(tuple(row))
+            return tuple(result)
+        prefix = [0]
+        for count in counts: prefix.append(prefix[-1] + count)
+        @lru_cache(maxsize=None)
+        def rec(r, used):
+            check()
+            if r == len(counts): return (0, 0, 0.0, ()) if used == male else None
+            count = counts[r]; best = None
+            for m in range(max(0, count - (female - (prefix[r] - used))), min(count, male - used) + 1):
+                f = count - m; row = tokens(m, f); tail = rec(r + 1, used + m)
+                if tail is None: continue
+                sym = sum(a != b for a, b in zip(row[:count//2], reversed(row))) if m and f and abs(m-f)>1 else 0
+                minority = "M" if m < f else "F"
+                cent = sum((i - (count-1)/2)**2 for i,s in enumerate(row) if s==minority) if m and f and abs(m-f)>1 else 0
+                value = (tail[0] + max(0, abs(m-f)-1), tail[1] + sym, tail[2] + cent, (row,) + tail[3])
+                if best is None or value[:3] < best[:3]: best = value
+            return best
+        return rec(0, 0)[3]
+    def assign(rows, reverse=False, color_seed=False):
+        counts = tuple(len(ids) for zi, ids in rows)
+        raw = reflow(rows)
+        if raw is None: return None
+        position = {p["id"]: p["centerX"] for p in raw["placements"]}
+        templates = gender_templates(counts) if use_gender else tuple(tuple("A" for _ in ids) for zi, ids in rows)
+        if reverse:
+            templates = tuple(tuple(reversed(t)) if r % 2 else t for r,t in enumerate(templates))
+        pools, slots = {}, {}
+        for item in by_id.values(): pools.setdefault(item["gender"] if use_gender else "A", []).append(item)
+        result = [(zi, [None] * len(ids)) for zi, ids in rows]
+        for r, ((zi, ids), template) in enumerate(zip(rows, templates)):
+            for c, (id_, sex) in enumerate(zip(ids, template)):
+                slots.setdefault(sex, []).append((position[id_], r, c))
+        for sex, pool in pools.items():
+            if use_head:
+                pool.sort(key=lambda i: (-(i["headTurn"] / 80 + (.15 * i["headLeanWeight"] * i["headLean"] / 30 if i.get("headLeanValid", False) else 0)) if i.get("headTurnValid", False) else 0, i["order"]))
+                targets = sorted(slots[sex])
+            else: targets = slots[sex]
+            if color_seed:
+                # Preserve the pose seed: colour orders only equal-pose buckets.
+                # The full candidate is still judged with the global objective.
+                buckets = {}
+                for index,item in enumerate(pool):
+                    if not item.get("colorPalette"): continue
+                    pose = (item.get("headTurnValid",False),item["headTurn"],item.get("headLeanValid",False),item["headLean"],item["headLeanWeight"]) if use_head else ()
+                    buckets.setdefault(pose,[]).append(index)
+                for indices in buckets.values():
+                    ordered = sorted((pool[i] for i in indices),key=lambda i:(-sum(p["weight"]*p["lab"][0] for p in i["colorPalette"]),i["order"]))
+                    if color_mode == "contrast":
+                        alternating=[]
+                        while ordered:
+                            alternating.append(ordered.pop(0))
+                            if ordered:alternating.append(ordered.pop())
+                        ordered=alternating
+                    for index,item in zip(indices,ordered):pool[index]=item
+            for item, (x,r,c) in zip(pool, targets): result[r][1][c] = item["id"]
+        return result
+    def row_quality(plan):
+        groups = {}
+        for row in plan["rows"]: groups.setdefault(row["zoneIndex"], []).append(len(row["ids"]))
+        singletons = excess = 0
+        for counts in groups.values():
+            if len(counts) > 1:
+                singletons += sum(c == 1 for c in counts)
+                excess += max(0, max(counts) - min(counts) - 2)
+        return singletons, excess
+    baseline_quality = row_quality(baseline)
+    # All candidates are complete plans. The geometric incumbent is always kept.
+    candidates = [baseline]; best_scale = baseline["commonScale"]; evaluated = 0
+    skeletons, seen = [], set()
+    def add_skeleton(rows):
+        key = tuple((zi, len(ids)) for zi, ids in rows)
+        if key not in seen and len(skeletons) < 96:
+            seen.add(key); skeletons.append([(zi, list(ids)) for zi, ids in rows])
+    def consider(rows):
+        nonlocal best_scale, evaluated, candidates
+        check(); evaluated += 1
+        plan = reflow(rows)
+        if plan is None: return None
+        quality = row_quality(plan)
+        if quality[0] > baseline_quality[0] or quality[1] > baseline_quality[1]: return None
+        if plan["commonScale"] < best_scale * .99 - 1e-9: return None
+        plan["_score"] = score(plan)
+        best_scale = max(best_scale, plan["commonScale"])
+        candidates = [p for p in candidates if p["commonScale"] >= best_scale * .99 - 1e-9]
+        candidates.append(plan)
+        # Limit retained data, always preserving the largest geometric candidate.
+        if len(candidates) > 16:
+            largest = max(candidates, key=lambda p:p["commonScale"])
+            candidates = sorted(candidates, key=lambda p:score_key(p))[:15]
+            if not any(p is largest for p in candidates): candidates.append(largest)
+        return plan
+    add_skeleton([(r["zoneIndex"], r["ids"]) for r in baseline["rows"]])
+    seed = payload.get("seedRows")
+    exhausted = False
+    try:
+        if seed is not None:
+            if not isinstance(seed, list) or any(not isinstance(r, dict) or not isinstance(r.get("ids"), list) for r in seed):
+                raise ValueError("Invalid composition seed")
+            seed_rows = [(r.get("zoneIndex"), r["ids"]) for r in seed]
+            plan = consider(seed_rows)
+            if plan: add_skeleton(seed_rows)
+        # Explore topology as well as ordering: row count changes and transfers
+        # of one/two photos between any rows or zones, up to two neighbourhoods.
+        cursor = 0
+        while cursor < min(24, len(skeletons)):
+            check(); rows = skeletons[cursor]; cursor += 1
+            for a, (zi, ids) in enumerate(rows):
+                if not desired and len(ids) > 1:
+                    k = len(ids)//2; add_skeleton(rows[:a] + [(zi, ids[:k]), (zi, ids[k:])] + rows[a+1:])
+                if not desired and a+1 < len(rows) and rows[a+1][0] == zi:
+                    add_skeleton(rows[:a] + [(zi, ids + rows[a+1][1])] + rows[a+2:])
+                for b in range(len(rows)):
+                    if a == b: continue
+                    for amount in (1,2):
+                        if len(ids) <= amount: continue
+                        trial = [(z,list(v)) for z,v in rows]
+                        moved = trial[a][1][-amount:]; del trial[a][1][-amount:]; trial[b][1].extend(moved)
+                        add_skeleton(trial)
+            # Fairness: evaluate each topology while expanding; never spend the
+            # full budget building a queue before trying semantic assignments.
+            for trial in (rows, assign(rows), assign(rows, True), assign(rows, color_seed=True) if color_mode != "off" else None):
+                if trial: consider(trial)
+        for rows in skeletons[cursor:]:
+            check()
+            for trial in (rows, assign(rows), assign(rows, True), assign(rows, color_seed=True) if color_mode != "off" else None):
+                if trial: consider(trial)
+        # Improve complete shortlisted plans with global pair exchanges.
+        for initial in sorted(candidates, key=lambda p:score_key(p))[:3]:
+            rows = [(r["zoneIndex"], list(r["ids"])) for r in initial["rows"]]
+            current = initial; slots = [(r,c) for r,(_,ids) in enumerate(rows) for c in range(len(ids))]
+            for _ in range(3):
+                changed = False
+                for ai, (ra,ca) in enumerate(slots):
+                    check()
+                    for rb,cb in slots[ai+1:]:
+                        ia,ib=by_id[rows[ra][1][ca]],by_id[rows[rb][1][cb]]
+                        if color_mode == "off" and not use_head and (not use_gender or ia["gender"] == ib["gender"]): continue
+                        rows[ra][1][ca],rows[rb][1][cb]=ib["id"],ia["id"]
+                        trial=consider(rows)
+                        if trial and trial["_score"] < score_key(current):
+                            current=trial;changed=True
+                        else: rows[ra][1][ca],rows[rb][1][cb]=ia["id"],ib["id"]
+                if not changed: break
+    except TimeoutError:
+        exhausted = True
+    eligible = [p for p in candidates if p["commonScale"] >= best_scale * .99 - 1e-9]
+    best = min(eligible, key=lambda p:score_key(p))
+    best = {k:v for k,v in best.items() if k != "_score"}
+    best.update(compositionSearch=True, referenceScale=best_scale, maxScaleLoss=.01,
+                compositionEvaluated=evaluated, compositionTopologies=len(skeletons), compositionScore=list(score(best)[:6]), compositionColorCost=composition_color_cost(best,by_id,color_mode,color_distances),
+                budgetExhausted=exhausted or baseline.get("budgetExhausted",False),
+                geometryBaseline={k:v for k,v in baseline.items() if k != "_score"}, elapsed=round(time.monotonic()-started,3))
+    return best
+
+
 def register_active_request(request_id):
     state = {"cancel": threading.Event(), "last_heartbeat": time.monotonic()}
     with active_requests_lock:
@@ -1637,14 +2037,14 @@ def handle_client(client_socket):
                 unregister_active_request(request_id)
                 last_request_time = time.monotonic()
             return
-        if kind == "layout_zones":
+        if kind in ("layout_zones", "layout_composition"):
             state = register_active_request(request_id)
             if not request_lock.acquire(False):
                 unregister_active_request(request_id)
                 reply("error", "Analysis is busy; wait for the previous request to finish.")
                 return
             try:
-                answer = calculate_zone_layout(message.get("message"), state)
+                answer = (calculate_composition_layout if kind == "layout_composition" else calculate_zone_layout)(message.get("message"), state)
                 if request_cancelled(state):
                     reply("cancelled", "Operation cancelled")
                 else:
