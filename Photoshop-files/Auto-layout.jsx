@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.23 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.25 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -43,7 +43,7 @@
 
 $.localize = true;
 
-var ver = '0.10.23',
+var ver = '0.10.25',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -55,6 +55,7 @@ var ver = '0.10.23',
     INIT_DELAY = 60000,
     ANALYSIS_DELAY = 60000,
     GENDER_PREVIEW_SIZE = 1024,
+    COMPOSITION_MAX_SCALE_LOSS = 0.01,
     OPTIONAL_PYTHON_FAILURE_LIMIT = 3,
     OPTIONAL_PYTHON_EMPTY_LIMIT = 3;
 
@@ -170,21 +171,27 @@ function main() {
             useHead = !!(headTurnSummary && !headTurnSummary.fallbackToGeometry);
         }, 30, 32);
         layoutPlan = runLayoutProgressStage('Calculating selection packing', function () {
-            return useGender ? buildGenderAwareLayoutPlan(items, selectionGeometry) : buildLayoutPlan(items, selectionGeometry);
+            var seed = useGender ? buildGenderAwareLayoutPlan(items, selectionGeometry) : buildLayoutPlan(items, selectionGeometry);
+            if (compositionSearchRequested(items) && !seed.pythonComposition) {
+                var expanded = tryPythonZoneLayout(items, selectionGeometry, seed.baseGapX, seed.baseGapY, seed);
+                if (expanded) return expanded;
+            }
+            return seed;
         }, 32, 55);
         if (alphabetical && cfg.alphabetOrder == 'zone')
             layoutPlan = sortAlphabeticalZones(layoutPlan, selectionGeometry);
         layoutPlan.genderSummary = genderSummary;
         if (semanticRequested) runLayoutProgressStage('Semantic ordering', function () {
             var useColor = !!(analysis.color && !analysis.color.fallbackToGeometry),
-                phases = (useGender || useHead ? 1 : 0) + (useColor ? 1 : 0), phase = 0;
-            if (useGender || useHead) {
+                joint = !!layoutPlan.pythonComposition,
+                phases = (useGender || useHead || joint ? 1 : 0) + (useColor && !joint ? 1 : 0), phase = 0;
+            if (useGender || useHead || joint) {
                 setLayoutProgressRange(phase++ / phases, 1 / phases);
-                layoutPlan = optimizeSemanticAssignment(layoutPlan, selectionGeometry, useGender, useHead);
+                layoutPlan = optimizeCompositionAssignment(layoutPlan, selectionGeometry, useGender, useHead, useColor);
                 layoutUnitProgress(1, 1, 'Gender and pose ordering complete');
             }
             layoutPlan.headTurnSummary = headTurnSummary;
-            if (useColor) {
+            if (useColor && !joint) {
                 setLayoutProgressRange(phase++ / phases, 1 / phases);
                 layoutPlan = optimizeColorAssignment(layoutPlan, selectionGeometry, useGender, useHead, cfg.colorMode);
                 layoutUnitProgress(1, 1, 'Color ordering complete');
@@ -852,8 +859,8 @@ function Locale() {
         'Surname and given name from the layer name; numbers and service labels are skipped. Python is required to parse names. Other additional options are ignored.');
     this.pythonPacking = this.t('рассчитывать заполнение площадок в Python', 'calculate zone packing in Python');
     this.pythonPackingTip = this.t(
-        'Более широкий поиск для составного выделения. При недоступности сервера расчёт выполняет JSX.',
-        'Broader search for compound selections. If the server is unavailable, JSX performs the calculation.');
+        'Расширенный поиск геометрии. С М/Д, поворотом или цветом одежды — совместный подбор состава рядов и позиций, с потерей масштаба до 1%. Фиксированные экшены сохраняют размеры и интервалы. При недоступности сервера расчёт выполняет JSX.',
+        'Extended geometry search. With gender, pose or clothing color enabled, jointly searches row composition and positions with at most 1% scale loss. Fixed actions preserve sizes and gaps. Falls back to JSX if the server is unavailable.');
     this.alternateGender = this.t('чередовать мальчиков и девочек', 'alternate boys and girls');
     this.headTurn = this.t('учитывать разворот тела и головы', 'consider body and head turn');
     this.headTurnTip = this.t(
@@ -3045,7 +3052,7 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
     }
     var metadata = {};
     copyDefinedPlanMetadata(metadata, plan, ['scaleX', 'scaleY', 'fitDifference', 'rhythmPenalty',
-        'shapedSelection', 'multiZoneSelection', 'zoneCount', 'usedZoneCount', 'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics']);
+        'shapedSelection', 'multiZoneSelection', 'zoneCount', 'usedZoneCount', 'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics', 'pythonComposition', 'compositionReferenceScale', 'compositionScaleLoss', 'compositionEvaluated', 'compositionColorCost']);
     var semanticFixed = cfg.horizontalAlign == 'justify' ? null : fixed,
         candidate = finalizeLayoutRows(specs, plan.commonScale, plan.baseGapX, plan.baseGapY, plan.actualGapY, metadata, semanticFixed);
     if (!candidate) return null;
@@ -4227,7 +4234,7 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
 
     copyDefinedPlanMetadata(plan, metadata, [
         'shapedSelection', 'multiZoneSelection', 'zoneCount', 'usedZoneCount',
-        'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics'
+        'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics', 'pythonComposition', 'compositionReferenceScale', 'compositionScaleLoss', 'compositionEvaluated', 'compositionColorCost'
     ]);
     return plan;
 }
@@ -4339,8 +4346,59 @@ function markComponentSignature(signature, index) {
     return signature.substring(0, index) + '1' + signature.substring(index + 1);
 }
 
-function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY) {
-    if (alphabetOrderActive() || !cfg.pythonPacking || packingDisabledForRun) return null;
+function compositionSearchRequested(items) {
+    if (!cfg.pythonPacking || alphabetOrderActive() || lockedLayoutActive()) return false;
+    var palettes = 0;
+    for (var i = 0; i < items.length; i++) {
+        if (normalizeColorMode(cfg.colorMode) != 'off' && items[i].colorPalette) palettes++;
+        if ((cfg.alternateGender && (items[i].gender == 'M' || items[i].gender == 'F')) ||
+            (cfg.considerHeadTurn && items[i].headTurnValid)) return true;
+    }
+    return palettes >= 2;
+}
+
+function optimizeCompositionAssignment(plan, geometry, useGender, useHead, useColor) {
+    if (!plan.pythonComposition) return optimizeSemanticAssignment(plan, geometry, useGender, useHead);
+    if (useColor == undefined) useColor = normalizeColorMode(cfg.colorMode) != 'off';
+    var candidates = [plan], best = null, bestScore = null, bestColor = 0, distances = {},
+        reference = plan.compositionReferenceScale;
+    if (plan.compositionGeometryBaseline) candidates.push(plan.compositionGeometryBaseline);
+    if (plan.compositionJSXBaseline) candidates.push(plan.compositionJSXBaseline);
+    for (var i = 0; i < candidates.length; i++) reference = Math.max(reference, candidates[i].commonScale);
+    for (i = 0; i < candidates.length; i++) {
+        if (candidates[i].commonScale < reference * (1 - COMPOSITION_MAX_SCALE_LOSS) - 1e-9) continue;
+        setLayoutProgressRange(i / candidates.length, 1 / candidates.length);
+        var candidate = useGender || useHead ? optimizeSemanticAssignment(candidates[i], geometry, useGender, useHead) : candidates[i],
+            score = getSemanticAssignmentScore(candidate, geometry, useGender, useHead), colorCost = 0;
+        if (useColor) {
+            var colored = optimizeColorAssignment(candidate, geometry, useGender, useHead, cfg.colorMode),
+                coloredScore = getSemanticAssignmentScore(colored, geometry, useGender, useHead);
+            // Joint search has strict priorities: colour cannot spend a better
+            // gender or pose score. Keep the original if legacy colour refinement
+            // used its bounded pose concession.
+            if (!betterSemanticAssignment(score, coloredScore, useHead)) {
+                candidate = colored; score = coloredScore;
+            }
+            colorCost = colorAssignmentCost(candidate, cfg.colorMode, distances);
+        }
+        var sameSemantics = best && !betterSemanticAssignment(score, bestScore, useHead) && !betterSemanticAssignment(bestScore, score, useHead);
+        if (!best || betterSemanticAssignment(score, bestScore, useHead) || (sameSemantics &&
+            (colorCost < bestColor - 1e-8 || (Math.abs(colorCost - bestColor) <= 1e-8 && candidate.commonScale > best.commonScale + 1e-9)))) {
+            best = candidate; bestScore = score; bestColor = colorCost;
+        }
+    }
+    if (!best) throw new Error(str.t('Нет допустимой композиции в пределах потери масштаба.', 'No valid composition within the scale-loss limit.'));
+    validateLayoutPlan(best, geometry);
+    best.pythonComposition = true;
+    best.compositionReferenceScale = reference;
+    best.compositionScaleLoss = Math.max(0, 1 - best.commonScale / reference);
+    best.compositionEvaluated = plan.compositionEvaluated;
+    if (useColor) best.compositionColorCost = bestColor;
+    return best;
+}
+
+function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
+    if (alphabetOrderActive() || !cfg.pythonPacking || packingDisabledForRun || lockedLayoutActive()) return null;
     var init = pythonApi.tryInit();
     if (!init || !init.ok) {
         packingDisabledForRun = true;
@@ -4348,17 +4406,62 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY) {
         return null;
     }
     try {
-        var zones = flattenComponentZones(geometry.components), data = [], zoneData = [], i;
-        for (i = 0; i < items.length; i++) data.push({ id: items[i].id, width: items[i].width, height: items[i].height });
+        var zones, composition = compositionSearchRequested(items), data = [], zoneData = [], i;
+        if (geometry.isRectangle) zones = [{ left: geometry.bounds.left, top: geometry.bounds.top,
+            right: geometry.bounds.right, bottom: geometry.bounds.bottom, componentIndex: 0 }];
+        else {
+            if (!geometry.multiZone) buildStableLayoutZones(geometry.bands, geometry.components, GEOMETRY_EPS);
+            zones = flattenComponentZones(geometry.components);
+        }
+        for (i = 0; i < items.length; i++) {
+            var item = items[i], entry = { id: item.id, width: item.width, height: item.height };
+            if (composition) {
+                entry.gender = item.gender || 'U';
+                entry.headTurnValid = !!item.headTurnValid; entry.headTurn = item.headTurnValid ? item.headTurn : 0;
+                entry.headLeanValid = !!item.headLeanValid; entry.headLean = item.headLeanValid ? item.headLean : 0;
+                entry.headLeanWeight = item.headLeanValid ? item.headLeanWeight : 0;
+                if (normalizeColorMode(cfg.colorMode) != 'off') entry.colorPalette = item.colorPalette || null;
+            }
+            data.push(entry);
+        }
         for (i = 0; i < zones.length; i++) zoneData.push({ left: zones[i].left, top: zones[i].top,
             right: zones[i].right, bottom: zones[i].bottom, componentIndex: zones[i].componentIndex });
-        progress(32, 'Python: searching zone packing...');
-        beginPythonProgressWait(1, 8000);
-        var answer = pythonApi.sendPayload('layout_zones', { items: data, zones: zoneData,
+        progress(32, composition ? 'Python: searching whole-sheet composition...' : 'Python: searching zone packing...');
+        beginPythonProgressWait(1, composition ? 14000 : 8000);
+        var payload = { items: data, zones: zoneData,
             baseGapX: baseGapX, baseGapY: baseGapY, maxGapMultiplier: cfg.maxGapMultiplier,
             horizontalAlign: cfg.horizontalAlign, rowRhythm: cfg.rowRhythm,
-            rows: cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)) }, { longRequest: true });
-        var plan = decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGapY);
+            rows: cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)) };
+        if (composition) {
+            payload.useGender = !!cfg.alternateGender; payload.useHead = !!cfg.considerHeadTurn;
+            payload.colorMode = normalizeColorMode(cfg.colorMode);
+            if (seedPlan && geometry.isRectangle) {
+                payload.seedRows = [];
+                for (i = 0; i < seedPlan.rows.length; i++) {
+                    var ids = [];
+                    for (var c = 0; c < seedPlan.rows[i].items.length; c++) ids.push(seedPlan.rows[i].items[c].id);
+                    payload.seedRows.push({ zoneIndex: 0, ids: ids });
+                }
+            }
+        }
+        var answer = pythonApi.sendPayload(composition ? 'layout_composition' : 'layout_zones', payload, { longRequest: true }),
+            plan = decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGapY);
+        if (composition) {
+            if (answer.compositionSearch !== true || typeof answer.referenceScale != 'number' || !isFinite(answer.referenceScale) ||
+                answer.referenceScale < plan.commonScale - 1e-9 ||
+                plan.commonScale < answer.referenceScale * (1 - COMPOSITION_MAX_SCALE_LOSS) - 1e-9)
+                throw new Error(str.t('Python нарушил предел потери масштаба.', 'Python violated the scale-loss limit.'));
+            plan.pythonComposition = true;
+            plan.compositionReferenceScale = answer.referenceScale;
+            plan.compositionEvaluated = answer.compositionEvaluated;
+            plan.compositionGeometryBaseline = decodePythonZoneLayout(answer.geometryBaseline, items, geometry, zones, baseGapX, baseGapY);
+            if (seedPlan) {
+                // A decomposed shape may fit less tightly than the original JSX
+                // band solver. Always keep the original valid geometry eligible.
+                plan.compositionJSXBaseline = seedPlan;
+                plan.compositionReferenceScale = Math.max(plan.compositionReferenceScale, seedPlan.commonScale);
+            }
+        }
         progress(55, 'Python: layout validated.');
         return plan;
     } catch (e) {
@@ -4420,7 +4523,7 @@ function decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGa
     if (hasAdjacent && (answer.gapY < minY - 1e-6 || answer.gapY > minY * cfg.maxGapMultiplier + 1e-6))
         throw new Error(str.t('Python нарушил заданный интервал.', 'Python violated the requested gap.'));
     var plan = finalizeLayoutRows(specs, answer.commonScale, baseGapX, baseGapY, answer.gapY, {
-        shapedSelection: true, multiZoneSelection: true, zoneCount: geometry.zoneCount,
+        shapedSelection: !geometry.isRectangle, multiZoneSelection: !!geometry.multiZone, zoneCount: zones.length,
         usedZoneCount: zoneCount, usedComponentCount: componentCount, layoutHeight: geometry.bounds.height,
         solverPasses: numeric(answer.tested) ? answer.tested : 0 });
     if (!plan) throw new Error(str.t('Python нарушил горизонтальную политику раскладки.', 'Python violated the horizontal layout policy.'));
