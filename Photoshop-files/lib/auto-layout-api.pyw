@@ -80,9 +80,10 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.25"
+SERVER_ID = "auto-layout/0.10.30"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
+COMPOSITION_MAX_SCALE_LOSS = 0.01
 
 NAME_CONFIDENCE = 0.94
 IMAGE_CONFIDENCE = 0.76
@@ -222,7 +223,7 @@ def alphabetical_name_key(layer_name):
     for ni, (ns, _, _) in enumerate(roles):
         if ns <= 0:
             continue
-        for si, (_, ss, middle) in enumerate(roles):
+        for si, (_, ss, _) in enumerate(roles):
             if ni == si or ss <= 0 or abs(ni - si) > 2:
                 continue
             pairs.append((ns + ss - abs(ni - si), -min(ni, si), si, ni))
@@ -552,27 +553,6 @@ def binary_probabilities(values):
     return e / total
 
 
-def classify_image(image_path):
-    img = read_image(image_path)
-    if img is None:
-        return {
-            "sex": "U", "confidence": 0.0, "source": "unknown",
-            "reason": "image_read_failed", "needs_image": False,
-            "analysis_status": "technical_failure",
-        }
-
-    selected, reason = choose_face(img)
-    if selected is None:
-        return {
-            "sex": "U", "confidence": 0.0, "source": "unknown",
-            "reason": reason, "needs_image": False,
-            "analysis_status": "not_applicable",
-        }
-
-    face_crop, face_score = selected
-    return classify_gender_crop(face_crop, face_score)
-
-
 def classify_gender_crop(face_crop, face_score, cancel_check=None):
     # Follow the ONNX Model Zoo reference preprocessing for GoogleNet:
     # convert the OpenCV BGR crop to RGB, resize to 224x224 and subtract
@@ -625,15 +605,6 @@ def classify_gender_crop(face_crop, face_score, cancel_check=None):
         "analysis_status": "ok",
         "face_confidence": float(face_score),
     }
-
-
-def classify_gender(layer_name, image_path=None):
-    by_name = classify_name(layer_name)
-    if by_name["sex"] != "U":
-        return by_name
-    if image_path:
-        return classify_image(image_path)
-    return by_name
 
 
 def get_head_landmarker():
@@ -1154,12 +1125,77 @@ def balanced_zone_counts(order, width, height, row_count, scale, gx, gy, check):
                     score = (old_score[0] + (count == 1), old_score[1] + count * count,
                              old_score[2] + count * (r - center) ** 2)
                     out = next_states.setdefault(end, [])
-                    if any(fh <= h + 1e-9 and fs <= score for fh, fs, fc in out): continue
+                    if any(fh <= h + 1e-9 and fs <= score for fh, fs, _ in out): continue
                     out[:] = [(fh, fs, fc) for fh, fs, fc in out if not (h <= fh + 1e-9 and score <= fs)]
                     out.append((h, score, old_counts + [count]))
         states = next_states
     feasible = states.get(n)
     return min(feasible, key=lambda x: x[1])[2] if feasible else None
+
+
+def render_zone_layout(row_specs, by_id, zones, scale, gx, gy, multiplier, align):
+    """Shared final coordinates/gaps for geometry and composition solvers.
+
+    Callers validate feasibility and IDs. This function does not search or alter
+    scale: it applies the same alignment policy to either solver's row assignment.
+    """
+    specs, grouped = [], {}
+    for source in row_specs:
+        row = dict(source)
+        if "contentWidth" not in row: row["contentWidth"] = sum(by_id[i]["width"] for i in row["ids"])
+        if "rowHeight" not in row: row["rowHeight"] = max(by_id[i]["height"] for i in row["ids"])
+        specs.append(row)
+        grouped.setdefault(row["zoneIndex"], []).append(row)
+    gap_y = gy * scale * multiplier
+    has_vertical = False
+    for zi, rows in grouped.items():
+        if len(rows) > 1:
+            has_vertical = True
+            zone = zones[zi]
+            gap_y = min(gap_y, (zone["bottom"] - zone["top"] - sum(r["rowHeight"] for r in rows) * scale) / (len(rows) - 1))
+    gap_y = max(gy * scale, gap_y) if has_vertical else 0.0
+    uniform_gap = gx * scale * multiplier
+    if align != "justify":
+        for row in specs:
+            if len(row["ids"]) > 1:
+                z = zones[row["zoneIndex"]]
+                limit = (z["right"] - z["left"] - row["contentWidth"] * scale) / (len(row["ids"]) - 1)
+                uniform_gap = min(uniform_gap, limit)
+        uniform_gap = max(gx * scale, uniform_gap)
+    def horizontal_gap(row):
+        count = len(row["ids"])
+        zone = zones[row["zoneIndex"]]
+        if count <= 1: return 0.0
+        if align == "justify":
+            return (zone["right"] - zone["left"] - row["contentWidth"] * scale) / (count - 1)
+        return uniform_gap
+    placements = []
+    for zi,z in enumerate(zones):
+        rows = grouped.get(zi, [])
+        height = sum(r["rowHeight"] for r in rows) * scale + max(0, len(rows) - 1) * gap_y
+        top = z["top"] + (z["bottom"] - z["top"] - height) / 2
+        block_width = max((r["contentWidth"] * scale + max(0, len(r["ids"]) - 1) * horizontal_gap(r) for r in rows), default=0.0)
+        inset = max(0.0, z["right"] - z["left"] - block_width) / 2
+        for row in rows:
+            count = len(row["ids"])
+            gap_x = horizontal_gap(row)
+            width = row["contentWidth"] * scale + max(0, count - 1) * gap_x
+            x = z["left"] + inset if align == "left" else z["left"] if align == "justify" and count > 1 else z["right"] - inset - width if align == "right" else z["left"] + (z["right"] - z["left"] - width) / 2
+            row.update(top=top, gapX=gap_x)
+            for id_ in row["ids"]:
+                item = by_id[id_]
+                placements.append(dict(id=id_, centerX=x + item["width"] * scale / 2,
+                                       centerY=top + item["height"] * scale / 2, scale=scale))
+                x += item["width"] * scale + gap_x
+            top += row["rowHeight"] * scale + gap_y
+    return dict(status="ok", commonScale=scale, gapY=gap_y, rows=specs, placements=placements)
+
+
+def layout_priority(item):
+    rank = item.get("priority", 1)
+    if type(rank) is not int or rank not in (0, 1, 2):
+        raise ValueError("Invalid layer label priority")
+    return rank
 
 
 def calculate_zone_layout(payload, state, time_budget=30.0):
@@ -1184,10 +1220,13 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
         return float(value)
     if not isinstance(payload, dict):
         raise ValueError("layout_zones payload must be an object")
+    no_enlarge = payload.get("noEnlarge", False)
+    if type(no_enlarge) is not bool: raise ValueError("Invalid no-enlargement flag")
     items, zones = payload.get("items"), payload.get("zones")
     if not isinstance(items, list) or not 1 <= len(items) <= 500 or not isinstance(zones, list) or not 1 <= len(zones) <= 128:
         raise ValueError("Unsupported item/zone count")
-    items = [dict(id=item["id"], width=number(item["width"], True), height=number(item["height"], True)) for item in items]
+    items = [dict(id=item["id"], width=number(item["width"], True), height=number(item["height"], True), priority=layout_priority(item)) for item in items]
+    items.sort(key=lambda item: item["priority"])
     if len({item["id"] for item in items}) != len(items) or any(type(i["id"]) is not int for i in items):
         raise ValueError("Layout IDs must be unique integers")
     clean_zones = []
@@ -1232,7 +1271,7 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
             center = 1 - (abs(i - middle) - minimum) / span_ if span_ > 0 else 1
             return center if rhythm == "centerWide" else 1 - center
         return sum(((v - low) / span - profile(i)) ** 2 for i, v in enumerate(counts)) / size
-    def search(order, scale, metrics, area_prefix):
+    def search(scale, metrics, area_prefix):
         # State keeps exact consumed count and component mask; fixed-row mode
         # also keeps row count. Per-zone DP tests every consecutive row split.
         states = {(0, 0, 0): (0.0, [], [])}
@@ -1265,7 +1304,7 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
                 options_cache[start] = result
                 return result
             next_states = {}
-            for (start, row_key, mask), (penalty, assignments, counts) in states.items():
+            for (start, _, mask), (penalty, assignments, counts) in states.items():
                 check()
                 variants = [(0, [])] + options(start) if start < n else [(0, [])]
                 for amount, row_counts in variants:
@@ -1305,18 +1344,19 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
     for key in (lambda i: (-i["height"], -i["width"], i["id"]),
                 lambda i: (-i["width"] / i["height"], i["id"]),
                 lambda i: (i["width"] / i["height"], i["id"])):
-        candidate = sorted(items, key=key)
+        candidate = sorted(items, key=lambda i: (i["priority"],) + key(i))
         if [i["id"] for i in candidate] not in [[i["id"] for i in order] for order in orders]: orders.append(candidate)
     if n <= 6:
-        signatures = {tuple((i["width"], i["height"]) for i in order) for order in orders}
+        signatures = {tuple((i["priority"], i["width"], i["height"]) for i in order) for order in orders}
         for candidate in itertools.permutations(items):
-            signature = tuple((i["width"], i["height"]) for i in candidate)
+            if any(a["priority"] > b["priority"] for a,b in zip(candidate, candidate[1:])): continue
+            signature = tuple((i["priority"], i["width"], i["height"]) for i in candidate)
             if signature not in signatures:
                 signatures.add(signature)
                 orders.append(list(candidate))
     else:
-        for candidate in (sorted(items, key=lambda i: (i["height"], i["width"], i["id"])),
-                          sorted(items, key=lambda i: (-i["width"] * i["height"], i["id"]))):
+        for candidate in (sorted(items, key=lambda i: (i["priority"], i["height"], i["width"], i["id"])),
+                          sorted(items, key=lambda i: (i["priority"], -i["width"] * i["height"], i["id"]))):
             if [i["id"] for i in candidate] not in [[i["id"] for i in order] for order in orders]:
                 orders.append(candidate)
     best = None
@@ -1334,21 +1374,28 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
                     table[end - start + 1] = (width, rh)
                 metrics.append(table)
                 area_prefix.append(area_prefix[-1] + order[start]["width"] * order[start]["height"])
-            high = min(max(z["width"] for z in zones) / max(i["width"] for i in order),
+            if no_enlarge:
+                allocation = search(1.0, metrics, area_prefix); tested += 1
+                if allocation is not None and (best is None or
+                        (allocation[0], rhythm_cost(allocation[2]), len(allocation[2])) <
+                        (best[2][0], rhythm_cost(best[2][2]), len(best[2][2]))):
+                    best = (1.0, order, allocation, metrics)
+                if allocation is not None or (best is not None and best[0] == 1.0): continue
+            high = min(1.0 if no_enlarge else math.inf, max(z["width"] for z in zones) / max(i["width"] for i in order),
                        max(z["height"] for z in zones) / max(i["height"] for i in order))
             low = 0.0
             # Subsequent orders first prove that they improve the current scale.
             if best:
-                probe = search(order, best[0], metrics, area_prefix); tested += 1
+                probe = search(best[0], metrics, area_prefix); tested += 1
                 if probe is None: continue
                 low = best[0]
             for _ in range(20 if order_index == 0 else 16):
                 check()
                 scale = (low + high) / 2
-                allocation = search(order, scale, metrics, area_prefix); tested += 1
+                allocation = search(scale, metrics, area_prefix); tested += 1
                 if allocation is None: high = scale
                 else:
-                    low = max(scale, exact_scale(allocation, metrics))
+                    low = max(scale, min(1.0, exact_scale(allocation, metrics)) if no_enlarge else exact_scale(allocation, metrics))
                     if best is None or low > best[0] + 1e-10 or (abs(low - best[0]) <= 1e-10 and (allocation[0], rhythm_cost(allocation[2]), len(allocation[2])) < (best[2][0], rhythm_cost(best[2][2]), len(best[2][2]))):
                         best = (low, order, allocation, metrics)
     except TimeoutError:
@@ -1376,50 +1423,10 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
             width, height = metrics[start][count]
             row_specs.append(dict(zoneIndex=zi, ids=[i["id"] for i in order[start:start + count]], contentWidth=width, rowHeight=height))
             start += count
-    gap_y = gy * scale * multiplier
-    has_vertical = False
-    for z in zones:
-        rows = [r for r in row_specs if r["zoneIndex"] == z["index"]]
-        if len(rows) > 1:
-            has_vertical = True
-            gap_y = min(gap_y, (z["height"] - sum(r["rowHeight"] for r in rows) * scale) / (len(rows) - 1))
-    gap_y = max(gy * scale, gap_y) if has_vertical else 0.0
-    uniform_gap = gx * scale * multiplier
-    if align != "justify":
-        for row in row_specs:
-            count = len(row["ids"])
-            if count > 1:
-                limit = (zones[row["zoneIndex"]]["width"] - row["contentWidth"] * scale) / (count - 1)
-                uniform_gap = min(uniform_gap, limit)
-        uniform_gap = max(gx * scale, uniform_gap)
-    placements = []
-    by_id = {i["id"]: i for i in order}
-    for z in zones:
-        rows = [r for r in row_specs if r["zoneIndex"] == z["index"]]
-        height = sum(r["rowHeight"] for r in rows) * scale + max(0, len(rows) - 1) * gap_y
-        top = z["top"] + (z["height"] - height) / 2
-        for row in rows:
-            count = len(row["ids"])
-            if align == "justify" and count > 1:
-                # Justify is per concrete physical row. Two rows with the same
-                # number of photos may have different gaps when their total
-                # photo widths differ. Horizontal max-gap multiplier does not
-                # limit Justify; the row reaches both zone edges exactly.
-                gap_x = (z["width"] - row["contentWidth"] * scale) / (count - 1)
-            else:
-                gap_x = uniform_gap if count > 1 else 0.0
-            width = row["contentWidth"] * scale + max(0, count - 1) * gap_x
-            x = z["left"] if align == "left" or (align == "justify" and count > 1) else z["right"] - width if align == "right" else z["left"] + (z["width"] - width) / 2
-            row.update(top=top, gapX=gap_x)
-            for id_ in row["ids"]:
-                item = by_id[id_]
-                placements.append(dict(id=id_, centerX=x + item["width"] * scale / 2,
-                                       centerY=top + item["height"] * scale / 2, scale=scale))
-                x += item["width"] * scale + gap_x
-            top += row["rowHeight"] * scale + gap_y
-    return dict(status="ok", commonScale=scale, gapY=gap_y, rows=row_specs, placements=placements,
-                tested=tested, orders=len(orders), searchSteps=steps, exhaustiveOrders=n <= 6, budgetExhausted=budget_exhausted,
-                elapsed=round(time.monotonic() - started, 3))
+    result = render_zone_layout(row_specs, {i["id"]:i for i in order}, zones, scale, gx, gy, multiplier, align)
+    result.update(tested=tested, orders=len(orders), searchSteps=steps, exhaustiveOrders=n <= 6,
+                  budgetExhausted=budget_exhausted, elapsed=round(time.monotonic() - started, 3))
+    return result
 
 
 def composition_color_cost(plan, by_id, mode, distances):
@@ -1439,7 +1446,7 @@ def composition_color_cost(plan, by_id, mode, distances):
         if not physical or abs(physical[-1][0]-row["top"])>=1:
             physical.append((row["top"],[]))
         physical[-1][1].extend(positions[i] for i in row["ids"])
-    for top,entries in physical:entries.sort(key=lambda p:(p["centerX"],by_id[p["id"]]["order"]))
+    for _,entries in physical:entries.sort(key=lambda p:(p["centerX"],by_id[p["id"]]["order"]))
     total=weight_sum=0.0;seen=set()
     def edge(a,b,weight):
         nonlocal total,weight_sum
@@ -1448,7 +1455,7 @@ def composition_color_cost(plan, by_id, mode, distances):
         key=tuple(sorted((ia,ib)))
         if key in seen:return
         seen.add(key);total+=weight*distance(ia,ib);weight_sum+=weight
-    for r,(top,entries) in enumerate(physical):
+    for r,(_,entries) in enumerate(physical):
         for a,b in zip(entries,entries[1:]):edge(a,b,1.0)
         if r+1>=len(physical):continue
         below=physical[r+1][1]
@@ -1483,9 +1490,11 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
     if color_mode not in ("off", "harmonious", "contrast"):
         raise ValueError("Invalid composition color mode")
     color_distances = {}
+    no_enlarge = payload.get("noEnlarge", False)
+    scale_loss_limit = COMPOSITION_MAX_SCALE_LOSS
     by_id = {}
     for order, source in enumerate(payload["items"]):
-        item = dict(source, order=order)
+        item = dict(source, order=order, priority=layout_priority(source))
         sex = item.get("gender", "U")
         if sex not in ("M", "F", "U"):
             raise ValueError("Invalid composition gender")
@@ -1525,14 +1534,16 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
     n = len(by_id)
     center = (min(z["left"] for z in zones) + max(z["right"] for z in zones)) / 2
     half = max(1.0, (max(z["right"] for z in zones) - min(z["left"] for z in zones)) / 2)
-    def reflow(rows, cap=math.inf):
+    def reflow(rows):
         if not rows or (desired and len(rows) != desired): return None
+        if any(type(zi) is not int or not 0 <= zi < len(zones) or not row for zi,row in rows): return None
         ids = [id_ for zi, row in rows for id_ in row]
         if len(ids) != n or set(ids) != set(by_id): return None
+        if any(by_id[a]["priority"] > by_id[b]["priority"] for a,b in zip(ids,ids[1:])): return None
+        if any(a[0] > b[0] for a,b in zip(rows,rows[1:])): return None
         groups = {}
-        scale = cap
+        scale = math.inf
         for zi, row in rows:
-            if type(zi) is not int or not 0 <= zi < len(zones) or not row: return None
             groups.setdefault(zi, []).append(row)
             z = zones[zi]
             scale = min(scale, (z["right"] - z["left"]) / (sum(by_id[i]["width"] for i in row) + gx * (len(row) - 1)))
@@ -1543,41 +1554,10 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
             z = zones[zi]
             scale = min(scale, (z["bottom"] - z["top"]) / (sum(max(by_id[i]["height"] for i in row) for row in group) + gy * (len(group) - 1)))
         if not math.isfinite(scale) or scale <= 0: return None
-        scale = math.nextafter(scale, 0.0)
-        gap_y = gy * scale * multiplier
-        for zi, group in groups.items():
-            if len(group) > 1:
-                z = zones[zi]
-                gap_y = min(gap_y, (z["bottom"] - z["top"] - sum(max(by_id[i]["height"] for i in row) for row in group) * scale) / (len(group) - 1))
-        has_vertical = any(len(group) > 1 for group in groups.values())
-        gap_y = max(gy * scale, gap_y) if has_vertical else 0.0
-        gap_x = gx * scale * multiplier
-        if align != "justify":
-            for zi, row in rows:
-                if len(row) > 1:
-                    z = zones[zi]
-                    gap_x = min(gap_x, (z["right"] - z["left"] - sum(by_id[i]["width"] for i in row) * scale) / (len(row) - 1))
-            gap_x = max(gx * scale, gap_x)
-        tops = {}
-        for zi, group in groups.items():
-            z = zones[zi]
-            height = sum(max(by_id[i]["height"] for i in row) for row in group) * scale + (len(group) - 1) * gap_y
-            tops[zi] = z["top"] + (z["bottom"] - z["top"] - height) / 2
-        row_specs, placements = [], []
-        for zi, row in rows:
-            z = zones[zi]; width = sum(by_id[i]["width"] for i in row)
-            height = max(by_id[i]["height"] for i in row)
-            gap = (z["right"] - z["left"] - width * scale) / (len(row) - 1) if align == "justify" and len(row) > 1 else gap_x if len(row) > 1 else 0.0
-            final_width = width * scale + gap * (len(row) - 1)
-            x = z["left"] if align == "left" or (align == "justify" and len(row) > 1) else z["right"] - final_width if align == "right" else z["left"] + (z["right"] - z["left"] - final_width) / 2
-            top = tops[zi]
-            row_specs.append(dict(zoneIndex=zi, ids=list(row), top=top, gapX=gap, contentWidth=width, rowHeight=height))
-            for id_ in row:
-                item = by_id[id_]
-                placements.append(dict(id=id_, centerX=x + item["width"] * scale / 2, centerY=top + item["height"] * scale / 2, scale=scale))
-                x += item["width"] * scale + gap
-            tops[zi] += height * scale + gap_y
-        return dict(status="ok", commonScale=scale, gapY=gap_y, rows=row_specs, placements=placements)
+        if no_enlarge and scale >= 1: scale = 1.0
+        else: scale = math.nextafter(scale, 0.0)
+        specs = [dict(zoneIndex=zi, ids=list(ids)) for zi,ids in rows]
+        return render_zone_layout(specs, by_id, zones, scale, gx, gy, multiplier, align)
     def score(plan):
         positions = {p["id"]: p["centerX"] for p in plan["placements"]}
         bad = good = symmetry = vertical = 0
@@ -1653,12 +1633,13 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
             return best
         return rec(0, small, "", "")[3]
     @lru_cache(maxsize=128)
-    def gender_templates(counts):
-        male = sum(i["gender"] == "M" for i in by_id.values())
-        female = sum(i["gender"] == "F" for i in by_id.values())
-        if male + female != n:
+    def gender_templates(counts, rank):
+        subset = [i for i in by_id.values() if i["priority"] == rank]
+        male = sum(i["gender"] == "M" for i in subset)
+        female = sum(i["gender"] == "F" for i in subset)
+        if male + female != len(subset):
             # Unknowns remain neutral. The swap search can improve this seed.
-            pool = {s: sum(i["gender"] == s for i in by_id.values()) for s in ("M", "F", "U")}
+            pool = {s: sum(i["gender"] == s for i in subset) for s in ("M", "F", "U")}
             result = []
             for r, count in enumerate(counts):
                 row = []
@@ -1686,19 +1667,24 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
             return best
         return rec(0, 0)[3]
     def assign(rows, reverse=False, color_seed=False):
-        counts = tuple(len(ids) for zi, ids in rows)
         raw = reflow(rows)
         if raw is None: return None
         position = {p["id"]: p["centerX"] for p in raw["placements"]}
-        templates = gender_templates(counts) if use_gender else tuple(tuple("A" for _ in ids) for zi, ids in rows)
-        if reverse:
-            templates = tuple(tuple(reversed(t)) if r % 2 else t for r,t in enumerate(templates))
+        templates = [[None] * len(ids) for _,ids in rows]
+        for rank in sorted({i["priority"] for i in by_id.values()}):
+            segments = [(r, [c for c,id_ in enumerate(ids) if by_id[id_]["priority"] == rank]) for r,(_,ids) in enumerate(rows)]
+            segments = [(r,cols) for r,cols in segments if cols]
+            counts = tuple(len(cols) for _,cols in segments)
+            tokens_ = gender_templates(counts,rank) if use_gender else tuple(tuple("A" for _ in cols) for _,cols in segments)
+            for (r,cols),template in zip(segments,tokens_):
+                if reverse and r % 2: template = tuple(reversed(template))
+                for c,sex in zip(cols,template): templates[r][c] = sex
         pools, slots = {}, {}
-        for item in by_id.values(): pools.setdefault(item["gender"] if use_gender else "A", []).append(item)
+        for item in by_id.values(): pools.setdefault((item["priority"], item["gender"] if use_gender else "A"), []).append(item)
         result = [(zi, [None] * len(ids)) for zi, ids in rows]
-        for r, ((zi, ids), template) in enumerate(zip(rows, templates)):
+        for r, ((_, ids), template) in enumerate(zip(rows, templates)):
             for c, (id_, sex) in enumerate(zip(ids, template)):
-                slots.setdefault(sex, []).append((position[id_], r, c))
+                slots.setdefault((by_id[id_]["priority"],sex), []).append((position[id_], r, c))
         for sex, pool in pools.items():
             if use_head:
                 pool.sort(key=lambda i: (-(i["headTurn"] / 80 + (.15 * i["headLeanWeight"] * i["headLean"] / 30 if i.get("headLeanValid", False) else 0)) if i.get("headTurnValid", False) else 0, i["order"]))
@@ -1721,7 +1707,7 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
                             if ordered:alternating.append(ordered.pop())
                         ordered=alternating
                     for index,item in zip(indices,ordered):pool[index]=item
-            for item, (x,r,c) in zip(pool, targets): result[r][1][c] = item["id"]
+            for item, (_,r,c) in zip(pool, targets): result[r][1][c] = item["id"]
         return result
     def row_quality(plan):
         groups = {}
@@ -1737,6 +1723,12 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
     candidates = [baseline]; best_scale = baseline["commonScale"]; evaluated = 0
     skeletons, seen = [], set()
     def add_skeleton(rows):
+        if len({i["priority"] for i in by_id.values()}) > 1:
+            ordered = sorted((id_ for _,ids in rows for id_ in ids), key=lambda id_: by_id[id_]["priority"])
+            offset = 0; ranked_rows = []
+            for zi,ids in rows:
+                ranked_rows.append((zi,ordered[offset:offset+len(ids)])); offset += len(ids)
+            rows = ranked_rows
         key = tuple((zi, len(ids)) for zi, ids in rows)
         if key not in seen and len(skeletons) < 96:
             seen.add(key); skeletons.append([(zi, list(ids)) for zi, ids in rows])
@@ -1747,15 +1739,15 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
         if plan is None: return None
         quality = row_quality(plan)
         if quality[0] > baseline_quality[0] or quality[1] > baseline_quality[1]: return None
-        if plan["commonScale"] < best_scale * .99 - 1e-9: return None
+        if plan["commonScale"] < best_scale * (1 - scale_loss_limit) - 1e-9: return None
         plan["_score"] = score(plan)
         best_scale = max(best_scale, plan["commonScale"])
-        candidates = [p for p in candidates if p["commonScale"] >= best_scale * .99 - 1e-9]
+        candidates = [p for p in candidates if p["commonScale"] >= best_scale * (1 - scale_loss_limit) - 1e-9]
         candidates.append(plan)
         # Limit retained data, always preserving the largest geometric candidate.
         if len(candidates) > 16:
             largest = max(candidates, key=lambda p:p["commonScale"])
-            candidates = sorted(candidates, key=lambda p:score_key(p))[:15]
+            candidates = sorted(candidates, key=score_key)[:15]
             if not any(p is largest for p in candidates): candidates.append(largest)
         return plan
     add_skeleton([(r["zoneIndex"], r["ids"]) for r in baseline["rows"]])
@@ -1794,7 +1786,7 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
             for trial in (rows, assign(rows), assign(rows, True), assign(rows, color_seed=True) if color_mode != "off" else None):
                 if trial: consider(trial)
         # Improve complete shortlisted plans with global pair exchanges.
-        for initial in sorted(candidates, key=lambda p:score_key(p))[:3]:
+        for initial in sorted(candidates, key=score_key)[:3]:
             rows = [(r["zoneIndex"], list(r["ids"])) for r in initial["rows"]]
             current = initial; slots = [(r,c) for r,(_,ids) in enumerate(rows) for c in range(len(ids))]
             for _ in range(3):
@@ -1803,6 +1795,7 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
                     check()
                     for rb,cb in slots[ai+1:]:
                         ia,ib=by_id[rows[ra][1][ca]],by_id[rows[rb][1][cb]]
+                        if ia["priority"] != ib["priority"]: continue
                         if color_mode == "off" and not use_head and (not use_gender or ia["gender"] == ib["gender"]): continue
                         rows[ra][1][ca],rows[rb][1][cb]=ib["id"],ia["id"]
                         trial=consider(rows)
@@ -1812,10 +1805,10 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
                 if not changed: break
     except TimeoutError:
         exhausted = True
-    eligible = [p for p in candidates if p["commonScale"] >= best_scale * .99 - 1e-9]
-    best = min(eligible, key=lambda p:score_key(p))
+    eligible = [p for p in candidates if p["commonScale"] >= best_scale * (1 - scale_loss_limit) - 1e-9]
+    best = min(eligible, key=score_key)
     best = {k:v for k,v in best.items() if k != "_score"}
-    best.update(compositionSearch=True, referenceScale=best_scale, maxScaleLoss=.01,
+    best.update(compositionSearch=True, referenceScale=best_scale, maxScaleLoss=scale_loss_limit,
                 compositionEvaluated=evaluated, compositionTopologies=len(skeletons), compositionScore=list(score(best)[:6]), compositionColorCost=composition_color_cost(best,by_id,color_mode,color_distances),
                 budgetExhausted=exhausted or baseline.get("budgetExhausted",False),
                 geometryBaseline={k:v for k,v in baseline.items() if k != "_score"}, elapsed=round(time.monotonic()-started,3))
@@ -2057,7 +2050,7 @@ def handle_client(client_socket):
                 request_lock.release()
                 flush_preview_cleanup()
             return
-        if kind in ("gender_image", "analyze_image"):
+        if kind == "analyze_image":
             state = register_active_request(request_id)
             if not request_lock.acquire(False):
                 unregister_active_request(request_id)
@@ -2070,22 +2063,17 @@ def handle_client(client_socket):
                 payload = message.get("message") or {}
                 if not isinstance(payload, dict):
                     raise ValueError(kind + " payload must be an object")
-                if kind == "analyze_image":
-                    answer = analyze_photo(payload, state)
-                    if answer.get("gender"):
-                        answer["gender"]["id"] = payload.get("id")
-                        log_gender_result(payload.get("name", ""), answer["gender"], request_id, "image")
-                    if answer.get("color"):
-                        logging.info("color_result %s", json.dumps(dict(request_id=request_id,
-                            id=payload.get("id"), **answer["color"]), ensure_ascii=False, allow_nan=False))
-                    if answer.get("head_turn"):
-                        logging.info("head_turn_result %s", json.dumps(dict(
-                            request_id=request_id, id=payload.get("id"), name=payload.get("name", ""),
-                            **answer["head_turn"]), ensure_ascii=False, allow_nan=False))
-                else:
-                    answer = classify_gender(payload.get("name", ""), payload.get("path"))
-                    answer["id"] = payload.get("id")
-                    log_gender_result(payload.get("name", ""), answer, request_id, "image")
+                answer = analyze_photo(payload, state)
+                if answer.get("gender"):
+                    answer["gender"]["id"] = payload.get("id")
+                    log_gender_result(payload.get("name", ""), answer["gender"], request_id, "image")
+                if answer.get("color"):
+                    logging.info("color_result %s", json.dumps(dict(request_id=request_id,
+                        id=payload.get("id"), **answer["color"]), ensure_ascii=False, allow_nan=False))
+                if answer.get("head_turn"):
+                    logging.info("head_turn_result %s", json.dumps(dict(
+                        request_id=request_id, id=payload.get("id"), name=payload.get("name", ""),
+                        **answer["head_turn"]), ensure_ascii=False, allow_nan=False))
                 if request_cancelled(state):
                     reply("cancelled", "Operation cancelled")
                 else:
