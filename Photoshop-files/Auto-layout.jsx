@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.30 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.31 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -44,7 +44,7 @@
 
 $.localize = true;
 
-var ver = '0.10.30',
+var ver = '0.10.31',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -85,6 +85,7 @@ var s2t = stringIDToTypeID,
     genderSummary = null,
     headTurnSummary = null,
     pendingPreviews = [],
+    previewWork = null,
     actionPlayback = false,
     actionLayoutProfile = null,
     runSucceeded = false,
@@ -253,6 +254,8 @@ function main() {
         if (layoutProgressRun) layoutProgressRun.active = false;
         cleanupPreviews();
     }
+    if (runSucceeded && analysis && analysis.failureMessage)
+        alert(str.t('Раскладка выполнена, но часть выбранного анализа не выполнена:\n', 'Layout completed, but some selected analysis could not be completed:\n') + analysis.failureMessage, 'Auto layout');
 }
 
 function hasLayoutActionParameters(d) {
@@ -662,17 +665,12 @@ function dialog(editingAction) {
     chPythonPacking.onClick = function () { cfg.pythonPacking = this.value; };
     chHeadTurn.value = cfg.considerHeadTurn;
     chHeadTurn.enabled = headAvailability.available;
-    if (!headAvailability.available && !editingAction) { chHeadTurn.value = false; cfg.considerHeadTurn = false; }
     chAlternateGender.value = cfg.alternateGender
     chAlternateGender.enabled = pythonAvailability.available
     stPythonStatus.visible = !pythonAvailability.available || !headAvailability.available || !!headAvailability.message
     stPythonStatus.text = pythonAvailability.available ? headAvailability.message :
         str.pythonUnavailablePrefix + pythonAvailability.message + '\n' + str.geometryWithoutPython
     if (!stPythonStatus.visible) pnAdditional.remove(stPythonStatus);
-    if (!pythonAvailability.available && !editingAction) {
-        chAlternateGender.value = false
-        cfg.alternateGender = false
-    }
     chGroupRows.value = cfg.groupRows
     dlAlphabet.selection = dlAlphabet.items[cfg.alphabetOrder == 'page' ? 1 : cfg.alphabetOrder == 'zone' ? 2 : 0];
     dlAlphabet.enabled = true; // Always allow disabling a saved mode if Python is unavailable.
@@ -707,27 +705,19 @@ function dialog(editingAction) {
         this.text = v
     }
 
-    dlRhythm.onChange = function () {
-        if (!this.selection) return;
-        switch (Number(this.selection.index)) {
-            case 1: cfg.rowRhythm = 'centerWide'; break;
-            case 2: cfg.rowRhythm = 'edgesWide'; break;
-            case 3: cfg.rowRhythm = 'alternateWide'; break;
-            case 4: cfg.rowRhythm = 'alternateNarrow'; break;
-            default: cfg.rowRhythm = 'auto'; break;
-        }
+    function readChoice(control, values, fallback) {
+        if (control.selection) for (var i = 0; i < control.items.length; i++)
+            if (String(control.selection.text) == String(control.items[i].text)) return values[i];
+        return fallback;
     }
-
-    dlAlign.onChange = function () {
-        if (!this.selection) return;
-        switch (Number(this.selection.index)) {
-            case 0: cfg.horizontalAlign = 'left'; break;
-            case 2: cfg.horizontalAlign = 'right'; break;
-            case 3: cfg.horizontalAlign = 'justify'; break;
-            default: cfg.horizontalAlign = 'center'; break;
-        }
-        updateGapMaxTitle()
+    function readRhythmSelection() {
+        cfg.rowRhythm = readChoice(dlRhythm, ['auto', 'centerWide', 'edgesWide', 'alternateWide', 'alternateNarrow'], 'auto');
     }
+    function readAlignmentSelection() {
+        cfg.horizontalAlign = readChoice(dlAlign, ['left', 'center', 'right', 'justify'], 'center');
+    }
+    dlRhythm.onChange = readRhythmSelection;
+    dlAlign.onChange = function () { readAlignmentSelection(); updateGapMaxTitle(); };
 
     slGapX.onChanging = function () {
         cfg.gapX = Math.round(this.value * 10) / 10
@@ -756,7 +746,21 @@ function dialog(editingAction) {
         cfg.priorityStartLabel = priorityDropdownValue(dlPriorityStart);
         cfg.priorityEndLabel = priorityDropdownValue(dlPriorityEnd);
         try { validatePrioritySettings(); } catch (priorityError) { alert(priorityError.message, 'Auto layout'); return; }
+        // Read every visible control on OK. ScriptUI event delivery must not
+        // determine either the saved settings or the options used for this run.
         cfg.noEnlarge = !!chNoEnlarge.value;
+        cfg.autoRows = !!chAutoRows.value;
+        cfg.rows = Math.max(1, Math.min(999, Math.round(Number(edRows.text) || 1)));
+        cfg.pythonPacking = !!chPythonPacking.value;
+        cfg.alternateGender = !!chAlternateGender.value;
+        cfg.considerHeadTurn = !!chHeadTurn.value;
+        cfg.groupRows = !!chGroupRows.value;
+        cfg.lockForAction = !!chLockAction.value;
+        cfg.gapX = Math.max(0, Math.min(30, Math.round(Number(slGapX.value) * 10) / 10 || 0));
+        cfg.gapY = Math.max(0, Math.min(30, Math.round(Number(slGapY.value) * 10) / 10 || 0));
+        cfg.maxGapMultiplier = Math.max(1, Math.min(4, Math.round(Number(slGapMax.value) || 1)));
+        readRhythmSelection();
+        readAlignmentSelection();
         readAlphabetSelection();
         // Read the selected item explicitly, even if ScriptUI skipped onChange.
         if (dlColor.selection) cfg.colorMode = colorModeFromSelection(dlColor.selection);
@@ -2580,8 +2584,17 @@ function analyzeSemantics(items) {
             restoreAnalysisHistory(parentDocumentId, analysisBaseHistory, false);
         }
     }
+    var failureMessages = [], featureStates = [];
+    if (cfg.alternateGender) featureStates.push(pythonFeatures.getState());
+    if (cfg.considerHeadTurn && hasPhotoCapableLayer) featureStates.push(headTurnFeatures.getState());
+    if (colorRequested && hasPhotoCapableLayer) featureStates.push(colorFeatures.getState());
+    for (i = 0; i < featureStates.length; i++) {
+        var message = featureStates[i].message;
+        if (message && !arrayContains(failureMessages, message)) failureMessages.push(message);
+    }
     progress(32, 'Analysis complete');
     return {
+        failureMessage: failureMessages.join('\n'),
         gender: cfg.alternateGender ? finalizeGenderSummary(items, !genderReady || pythonFeatures.isDisabled()) : null,
         headTurn: cfg.considerHeadTurn ? finalizeHeadTurnSummary(items, !headReady || headTurnFeatures.isDisabled()) : null,
         color: colorRequested ? finalizeColorSummary(items) : null,
@@ -2993,15 +3006,28 @@ function restoreAnalysisHistory(parentDocumentId, anchorHistory, usePrevious) {
     }
 }
 
+// Use a global suspendHistory entry point, independent of caller-local lookup.
+// The callback holds the per-photo state through a normal JavaScript closure.
+function autoLayoutPreviewWork() {
+    if (typeof previewWork != 'function') throw new Error('Preview callback is unavailable');
+    previewWork();
+}
+
 function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
     var result = { path: null },
         previewStateCreated = false;
 
     lr.selectLayers([item.id]);
+    var previousWork = typeof previewWork == 'undefined' ? null : previewWork;
+    previewWork = function () { makePreview(result); };
     try {
-        app.activeDocument.suspendHistory('Auto layout preview', 'makePreview(result)');
+        app.activeDocument.suspendHistory('Auto layout preview', 'autoLayoutPreviewWork();');
         previewStateCreated = true;
+    } catch (previewError) {
+        if (previewError.number == 8007) throw previewError;
+        throw new Error(str.t('Не удалось подготовить превью слоя "', 'Could not prepare a preview of layer "') + item.name + '": ' + (previewError.message || String(previewError)));
     } finally {
+        previewWork = previousWork;
         restoreAnalysisHistory(parentDocumentId, analysisAnchorHistory, previewStateCreated);
     }
 
@@ -6033,7 +6059,8 @@ function parseJSONData(text) {
 function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     var sequence = 0,
         session = (new Date()).getTime() + '-' + Math.floor(Math.random() * 1000000),
-        serverID = 'auto-layout/' + ver;
+        serverID = 'auto-layout/' + ver,
+        initializationResult = null;
 
     function runtimeFiles() {
         var local = $.getenv('LOCALAPPDATA');
@@ -6188,6 +6215,12 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     };
 
     this.tryInit = function () {
+        if (initializationResult) return initializationResult;
+        initializationResult = startOrConnect();
+        return initializationResult;
+    };
+
+    function startOrConnect() {
         try {
             var result = sendMessage({ type: 'handshake', message: '' }, 1000);
             if (isHandshake(result)) return { ok: true };
@@ -6215,6 +6248,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             if (layoutProgressRun && layoutProgressRun.active) { layoutProgressRun.detail = 'Starting Python module'; pulseLayoutProgress(true); }
             else app.changeProgressText('Starting Python module...');
             while ((new Date()).getTime() - start < INIT_DELAY) {
+                if (pulseLayoutProgress() === false) throwCancelled();
                 result = sendMessage({ type: 'handshake', message: '' }, 1000);
                 if (isHandshake(result)) return { ok: true };
                 if (result)
@@ -6226,7 +6260,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             if (e.number && e.number == 8007) throw e;
             return { ok: false, reason: 'startup_error', message: e && e.message ? e.message : String(e) };
         }
-    };
+    }
 
     function findPythonModule(name) {
         var folder = new File($.fileName).parent,
@@ -6278,9 +6312,18 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
         if (!listener.listen(portListen, 'UTF-8')) throw new Error(str.t('Порт ответа ', 'Response port ') + portListen + str.t(' занят.', ' is busy.'));
         try {
             sender.timeout = 1;
-            if (!sender.open(apiHost + ':' + portSend, 'UTF-8')) return null;
-            sent = true;
-            sender.writeln(objectToJSON(o));
+            try {
+                if (!sender.open(apiHost + ':' + portSend, 'UTF-8')) return null;
+                sent = true;
+                if (sender.writeln(objectToJSON(o)) === false)
+                    throw new Error(str.t('Не удалось передать запрос Python.', 'Could not send the Python request.'));
+            } catch (connectionError) {
+                if (connectionError.number == 8007) throw connectionError;
+                // A server that is still starting can refuse or reset a probe.
+                // Keep polling until the startup deadline, not just one attempt.
+                if (o.type == 'handshake') return null;
+                throw connectionError;
+            }
             sender.close();
 
             var start = (new Date()).getTime(),
