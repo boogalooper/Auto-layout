@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.42',
+const ver = '0.10.44',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -241,8 +241,7 @@ function getActionProfile(d) {
         var result = {
             scale: Number(d.getDouble(s2t('lockedScale'))),
             gapY: Number(d.getDouble(s2t('lockedGapY'))),
-            gapX: Number(d.getDouble(s2t('lockedGapX'))),
-            height: Number(d.getDouble(s2t('lockedHeight')))
+            gapX: Number(d.getDouble(s2t('lockedGapX')))
         };
         validateActionProfile(result);
         return result;
@@ -252,8 +251,7 @@ function getActionProfile(d) {
 function validateActionProfile(profile) {
     if (!profile || typeof profile.scale != 'number' || !isFinite(profile.scale) || profile.scale <= 0 ||
         typeof profile.gapY != 'number' || !isFinite(profile.gapY) || profile.gapY < 0 ||
-        typeof profile.gapX != 'number' || !isFinite(profile.gapX) || profile.gapX < 0 ||
-        typeof profile.height != 'number' || !isFinite(profile.height) || profile.height <= 0)
+        typeof profile.gapX != 'number' || !isFinite(profile.gapX) || profile.gapX < 0)
         throw new Error(str.t('В экшене нет корректного масштаба и интервалов. Запишите шаг заново на готовой раскладке.', 'The action does not contain valid scale and gap values. Record the step again using a completed layout.'));
 }
 
@@ -383,28 +381,20 @@ function fixedLayoutActive() {
     return !!(cfg.lockForAction && actionProfile);
 }
 
-function getFixedScale(items, profile) {
-    var height = getMedianHeight(items), scale = profile.height / height;
-    if (!isFinite(height) || height <= 0 || !isFinite(scale) || scale <= 0)
-        throw new Error(str.t('Не удалось определить опорную высоту объектов для экшена.',
-            'Could not determine the reference object height for the action.'));
+function getFixedScale(profile) {
+    validateActionProfile(profile);
+    var scale = profile.scale;
     if (cfg.noEnlarge && scale > 1 + 1e-12)
         throw new Error(str.t('Фиксированный экшен требует увеличить слои, но увеличение запрещено. Используйте объекты большего размера или перезапишите экшен.', 'The fixed action requires enlargement, but enlargement is disabled. Use larger source objects or record the action again.'));
     return cfg.noEnlarge ? Math.min(1, scale) : scale;
-}
-
-function getFixedRuntimeScale() {
-    return actionProfile.runtimeScale != undefined ? actionProfile.runtimeScale : actionProfile.scale;
 }
 
 function getLayoutProfile(plan) {
     var p = {
         scale: plan.commonScale,
         gapY: plan.actualGapY > 0 ? plan.actualGapY : plan.minFinalGapY,
-        gapX: plan.actualGapXMin > 0 ? plan.actualGapXMin : plan.minFinalGapX,
-        height: 0
+        gapX: plan.actualGapXMin > 0 ? plan.actualGapXMin : plan.minFinalGapX
     };
-    p.height = getMedianDimension(plan.placements, 'height');
     validateActionProfile(p);
     return p;
 }
@@ -445,10 +435,9 @@ function lockLayoutMetrics(plan, geometry) {
 function buildFixedLayout(items, geometry) {
     var profile = actionProfile;
     validateActionProfile(profile);
-    var scale = getFixedScale(items, profile),
+    var scale = getFixedScale(profile),
         gx = profile.gapX / scale,
         gy = profile.gapY / scale, zones;
-    profile.runtimeScale = scale;
     if (geometry.isRectangle) {
         zones = [{ left: geometry.bounds.left, right: geometry.bounds.right, top: geometry.bounds.top,
             bottom: geometry.bounds.bottom, width: geometry.bounds.width, height: geometry.bounds.height,
@@ -952,8 +941,8 @@ function Locale() {
     this.layoutLayers = this.t('Разложить слои', 'Arrange layers');
     this.lockAction = this.t('фиксировать отступы и трансформацию', 'lock gaps and transform');
     this.lockActionTip = this.t(
-        'В экшен записываются типичная высота объектов в пикселях и общие интервалы X/Y. Количество фото может меняться. При фиксации режим «По ширине» центрирует ряды с единым сохранённым X-интервалом. Масштаб определяется по типичной (медианной) высоте объектов.',
-        'Records the typical object height in pixels and common X/Y gaps. Photo count may change. With locking enabled, Justify centers rows using the saved common X gap. Scale is based on the typical (median) object height.');
+        'В экшен записываются общий коэффициент масштаба и интервалы X/Y в пикселях. Количество фото может меняться. При фиксации режим «По ширине» центрирует ряды с единым сохранённым X-интервалом. Сохранённый коэффициент масштаба применяется ко всем объектам без пересчёта по их размерам.',
+        'Records the common scale factor and X/Y gaps in pixels. Photo count may change. With locking enabled, Justify centers rows using the saved common X gap. The saved scale factor is applied without recalculating it from object dimensions.');
     this.lockActionRecordFirst = this.t(
         'Чтобы включить фиксацию, заново запишите шаг Auto Layout на готовой раскладке: масштаб и интервалы вычисляются только во время успешного запуска.',
         'To enable locking, record the Auto Layout step again on a completed layout: scale and gaps are calculated only during a successful run.');
@@ -1019,7 +1008,6 @@ function Config() {
                 d.putDouble(s2t('lockedScale'), actionProfile.scale);
                 d.putDouble(s2t('lockedGapY'), actionProfile.gapY);
                 d.putDouble(s2t('lockedGapX'), actionProfile.gapX);
-                d.putDouble(s2t('lockedHeight'), actionProfile.height);
             }
             app.playbackParameters = d;
         } else app.putCustomOptions(UUID, d, true)
@@ -2186,12 +2174,6 @@ function applyPreparedLayoutPlan(preparedMap) {
                 scaledProxyTop = cy + (entry.proxy.top - cy) * scale;
             entry.transformOffsetX = p.left - scaledProxyLeft;
             entry.transformOffsetY = p.top - scaledProxyTop;
-            entry.expectedBounds = {
-                left: cx + (transformBounds.left - cx) * scale + entry.transformOffsetX,
-                top: cy + (transformBounds.top - cy) * scale + entry.transformOffsetY,
-                right: cx + (transformBounds.right - cx) * scale + entry.transformOffsetX,
-                bottom: cy + (transformBounds.bottom - cy) * scale + entry.transformOffsetY
-            };
             if (!isFinite(entry.transformOffsetX) || !isFinite(entry.transformOffsetY))
                 throw new Error(str.t('Не удалось рассчитать трансформацию исходного объекта "', 'Could not calculate the transform for source object "') + p.name + str.t('".', '".'));
             unitProgress(i + 1, total, (i + 1) + '/' + total);
@@ -2209,8 +2191,6 @@ function applyPreparedLayoutPlan(preparedMap) {
                     lr.move(entry.transformOffsetX, entry.transformOffsetY);
             } else if (Math.abs(scale - 1) > 0.0000001 || Math.abs(entry.transformOffsetX) > 0.0001 || Math.abs(entry.transformOffsetY) > 0.0001)
                 lr.transformSelection(scale * 100, entry.transformOffsetX, entry.transformOffsetY);
-            if (layoutPlan.lockedMetrics)
-                validateAppliedBounds(entry.expectedBounds, getUnitTransformBounds(entry.roots), p.name);
             unitProgress(i + 1, total, (i + 1) + '/' + total);
         }
     });
@@ -4266,7 +4246,7 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
     if (!rowSpecs || !rowSpecs.length) return null;
 
     if (fixedLayoutActive()) {
-        if (Math.abs(commonScale - getFixedRuntimeScale()) > 1e-9) throw new Error(str.t('Изменился масштаб, зафиксированный в экшене.', 'The scale locked in the action has changed.'));
+        if (Math.abs(commonScale - actionProfile.scale) > 1e-9) throw new Error(str.t('Изменился масштаб, зафиксированный в экшене.', 'The scale locked in the action has changed.'));
         fixedGapPolicy = getFixedGaps(rowSpecs, actionProfile);
         if (!fixedGapPolicy) return null;
     }
@@ -5798,8 +5778,6 @@ function validateLayoutPlan(plan, geometry) {
             if (row.items.length > 1 && Math.abs(row.gapX - actionProfile.gapX) > 1e-7)
                 throw new Error(str.t('Изменился X-интервал экшена.', 'The action X gap has changed.'));
         }
-        if (Math.abs(getMedianDimension(plan.placements, 'height') - actionProfile.height) > 1e-7)
-            throw new Error(str.t('Изменилась опорная высота экшена.', 'The action reference height has changed.'));
     }
     var eps = 0.05, seenIds = {}, sourceIds = {};
     for (var si = 0; si < sourceState.layerIds.length; si++) sourceIds[String(sourceState.layerIds[si])] = true;
@@ -5848,19 +5826,6 @@ function rectanglesOverlap(a, b, eps) {
         a.top < b.bottom - eps && a.bottom > b.top + eps
 }
 
-function validateAppliedBounds(expected, actual, name) {
-    var eps = 1.01, keys = ['left', 'top', 'right', 'bottom'];
-    for (var i = 0; i < keys.length; i++) {
-        var key = keys[i];
-        if (!isFinite(Number(actual[key])) || Math.abs(Number(actual[key]) - expected[key]) > eps)
-            throw new Error(str.t('Photoshop не воспроизвёл записанную геометрию объекта "',
-                'Photoshop did not reproduce the recorded geometry of object "') + name + str.t('".', '".'));
-    }
-    if (Math.abs((actual.right - actual.left) - (expected.right - expected.left)) > eps ||
-        Math.abs((actual.bottom - actual.top) - (expected.bottom - expected.top)) > eps)
-        throw new Error(str.t('Photoshop изменил размер рамки объекта "', 'Photoshop changed the frame size of object "') + name + str.t('".', '".'));
-}
-
 function applyLayoutPlan() {
     if (cfg.noEnlarge && layoutPlan && layoutPlan.commonScale > 1 + 1e-12)
         throw new Error(str.t('Увеличение слоёв запрещено.', 'Layer enlargement is disabled.'));
@@ -5895,11 +5860,6 @@ function applyLayoutPlan() {
             if (!isFinite(actualLeft) || !isFinite(actualTop) || !isFinite(dX) || !isFinite(dY))
                 throw new Error(str.t('Не удалось рассчитать итоговое положение слоя "', 'Could not calculate the final position of layer "') + p.name + str.t('".', '".'));
             if (Math.abs(dX) > 0.0001 || Math.abs(dY) > 0.0001) lr.move(dX, dY);
-            if (layoutPlan.lockedMetrics) {
-                var applied = lr.getProperty('boundsNoEffects', false, p.layerId);
-                if (!applied || !applied.value) throw new Error(str.t('Не удалось проверить итоговые границы рамки.', 'Could not verify the final frame bounds.'));
-                validateAppliedBounds(p, lr.descToObject(applied.value), p.name);
-            }
             unitProgress(i + 1, total, (i + 1) + '/' + total);
         }
     });
