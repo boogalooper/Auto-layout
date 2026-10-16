@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.36 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.37 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -44,7 +44,7 @@
 
 $.localize = true;
 
-var ver = '0.10.36',
+var ver = '0.10.37',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -572,8 +572,14 @@ function dialog(editingAction) {
         chLockAction = pnAction.add('checkbox'),
 
         grButtons = dlg.add("group{orientation:'row',alignChildren:['center','center'],spacing:10,margins:0}"),
-        ok = grButtons.add('button', undefined, undefined, { name: 'ok' }),
-        cancel = grButtons.add('button', undefined, undefined, { name: 'cancel' });
+        ok = grButtons.add('button', undefined, undefined, { name: 'ok' });
+
+    dlg.addEventListener('keydown', function (event) {
+        if (event.keyName == 'Escape') {
+            event.preventDefault();
+            dlg.close(2);
+        }
+    }, true);
 
     // Common panel edges and label column; native ScriptUI performs final sizing.
     grRows.alignment = grRhythm.alignment = grAlign.alignment = ['fill', 'center'];
@@ -637,7 +643,6 @@ function dialog(editingAction) {
         chLockAction.enabled = false;
         chLockAction.helpTip = str.lockActionRecordFirst;
     }
-    cancel.text = str.cancel
 
     edRows.text = cfg.rows
     edRows.enabled = !cfg.autoRows
@@ -891,7 +896,6 @@ function Locale() {
     this.lockActionRecordFirst = this.t(
         'Чтобы включить фиксацию, заново запишите шаг Auto Layout на готовой раскладке: масштаб и интервалы вычисляются только во время успешного запуска.',
         'To enable locking, record the Auto Layout step again on a completed layout: scale and gaps are calculated only during a successful run.');
-    this.cancel = this.t('Отмена', 'Cancel');
     this.colorOff = this.t('Не учитывать', 'Do not use');
     this.colorHarmonious = this.t('Согласованные цвета', 'Harmonious colors');
     this.colorContrast = this.t('Максимальный контраст', 'Maximum contrast');

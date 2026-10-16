@@ -1,0 +1,170 @@
+name: Build release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (optional; by default read from Auto-layout.jsx)"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release version
+        id: release
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          JSX_VERSION="$(python3 - <<'PYTHON'
+          import re
+          from pathlib import Path
+
+          jsx = Path("Photoshop-files/Auto-layout.jsx").read_text(encoding="utf-8-sig")
+          server = Path("Photoshop-files/lib/auto-layout-api.pyw").read_text(encoding="utf-8-sig")
+          match = re.search(r"(?m)^var\s+ver\s*=\s*['\"]([0-9]+(?:\.[0-9]+)*)['\"]", jsx)
+          server_match = re.search(r"(?m)^SERVER_ID\s*=\s*['\"]auto-layout/([^'\"]+)['\"]", server)
+          if not match or not server_match:
+              raise SystemExit("Cannot read JSX or Python server version")
+          if match.group(1) != server_match.group(1):
+              raise SystemExit("JSX and Python server versions do not match")
+          print(match.group(1))
+          PYTHON
+          )"
+
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          else
+            VERSION="${INPUT_VERSION#v}"
+            if [ -z "${VERSION}" ]; then
+              VERSION="${JSX_VERSION}"
+            fi
+            TAG="v${VERSION}"
+          fi
+
+          if ! [[ "${VERSION}" =~ ^[0-9]+([.][0-9]+)*$ ]]; then
+            echo "Invalid version: ${VERSION}"
+            exit 1
+          fi
+
+          if [ "${VERSION}" != "${JSX_VERSION}" ]; then
+            echo "Release version ${VERSION} does not match JSX version ${JSX_VERSION}"
+            exit 1
+          fi
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Prepare release package
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          PACKAGE_NAME="Auto-layout-v${VERSION}"
+          PACKAGE_DIR="dist/${PACKAGE_NAME}"
+
+          rm -rf dist
+          mkdir -p "${PACKAGE_DIR}"
+
+          mkdir -p "${PACKAGE_DIR}/Photoshop-files/lib"
+          cp "README.md" "${PACKAGE_DIR}/README.md"
+          cp "install_runtime.bat" "${PACKAGE_DIR}/install_runtime.bat"
+          cp "Photoshop-files/Auto-layout.jsx" "${PACKAGE_DIR}/Photoshop-files/Auto-layout.jsx"
+          cp "Photoshop-files/lib/auto-layout-api.pyw" "${PACKAGE_DIR}/Photoshop-files/lib/auto-layout-api.pyw"
+
+          cd dist
+          zip -r "${PACKAGE_NAME}.zip" "${PACKAGE_NAME}"
+
+      - name: Prepare release notes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # The release being built does not exist on GitHub yet, so the latest
+          # published release is the previous one and can be used as the start point.
+          PREVIOUS_TAG=$(gh release list \
+            --exclude-drafts \
+            --exclude-pre-releases \
+            --limit 1 \
+            --json tagName \
+            --jq '.[0].tagName // empty')
+
+          {
+            echo "## История изменений"
+            echo
+
+            if [ -n "${PREVIOUS_TAG}" ]; then
+              echo "Изменения с ${PREVIOUS_TAG}:"
+              echo
+              git log "${PREVIOUS_TAG}..${GITHUB_SHA}" \
+                --reverse \
+                --no-merges \
+                --pretty=format:'- %s'
+              echo
+            else
+              # First release: there is no previous release to compare with.
+              git log "${GITHUB_SHA}" \
+                --reverse \
+                --no-merges \
+                --pretty=format:'- %s'
+              echo
+            fi
+          } > release-notes.md
+
+          echo "Release notes:"
+          cat release-notes.md
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="dist/Auto-layout-v${VERSION}.zip"
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists"
+            exit 1
+          fi
+
+          if git rev-parse "${TAG}^{commit}" >/dev/null 2>&1; then
+            gh release create "${TAG}" \
+              "${ARCHIVE}" \
+              --verify-tag \
+              --title "Auto Layout ${VERSION}" \
+              --notes-file release-notes.md \
+              --latest
+          else
+            gh release create "${TAG}" \
+              "${ARCHIVE}" \
+              --target "${GITHUB_SHA}" \
+              --title "Auto Layout ${VERSION}" \
+              --notes-file release-notes.md \
+              --latest
+          fi
