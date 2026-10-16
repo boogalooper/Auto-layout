@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.44',
+const ver = '0.10.45',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -6039,6 +6039,29 @@ function PythonFeature(api, failureLimit) {
 }
 
 
+function objectToJSON(o) {
+    function quote(value) {
+        return '"' + String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+            .replace(/[\x00-\x1f\u2028\u2029]/g, function (ch) {
+                return '\\u' + ('0000' + ch.charCodeAt(0).toString(16)).slice(-4);
+            }) + '"';
+    }
+    if (o === null || o === undefined) return 'null';
+    if (typeof o == 'string') return quote(o);
+    if (typeof o == 'number') {
+        if (!isFinite(o)) throw new Error('Non-finite JSON number');
+        return String(o);
+    }
+    if (typeof o == 'boolean') return String(o);
+    var parts = [], i, key;
+    if (o instanceof Array) {
+        for (i = 0; i < o.length; i++) parts.push(objectToJSON(o[i]));
+        return '[' + parts.join(',') + ']';
+    }
+    for (key in o) if (o.hasOwnProperty(key)) parts.push(quote(key) + ':' + objectToJSON(o[key]));
+    return '{' + parts.join(',') + '}';
+}
+
 function parseJSONData(text) {
     var input = String(text), pos = 0, size = input.length;
     function fail() { throw new Error('Invalid JSON data'); }
@@ -6403,28 +6426,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
         }
     }
 
-    function objectToJSON(o) {
-        function quote(value) {
-            return '"' + String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
-                .replace(/[\x00-\x1f\u2028\u2029]/g, function (ch) {
-                    return '\\u' + ('0000' + ch.charCodeAt(0).toString(16)).slice(-4);
-                }) + '"';
-        }
-        if (o === null || o === undefined) return 'null';
-        if (typeof o == 'string') return quote(o);
-        if (typeof o == 'number') {
-            if (!isFinite(o)) throw new Error('Non-finite JSON number');
-            return String(o);
-        }
-        if (typeof o == 'boolean') return String(o);
-        var parts = [], i, key;
-        if (o instanceof Array) {
-            for (i = 0; i < o.length; i++) parts.push(objectToJSON(o[i]));
-            return '[' + parts.join(',') + ']';
-        }
-        for (key in o) if (o.hasOwnProperty(key)) parts.push(quote(key) + ':' + objectToJSON(o[key]));
-        return '{' + parts.join(',') + '}';
-    }
+
 }
 
 function AM(target, order) {
