@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.38 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.39 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -44,7 +44,7 @@
 
 $.localize = true;
 
-var ver = '0.10.38',
+var ver = '0.10.39',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -291,6 +291,7 @@ function runAutoLayoutEntry() {
     actionLayoutProfile = actionPlayback && cfg.lockForAction ? readLockedActionProfile(app.playbackParameters) : null;
     var editing = actionPlayback && app.playbackDisplayDialogs == DialogModes.ALL;
     if (!actionPlayback || editing) {
+        checkAutoLayoutUpdates();
         var window = dialog(editing), result = window.show();
         if (result !== 1) { isCancelled = true; return; }
         if (editing) {
@@ -299,11 +300,122 @@ function runAutoLayoutEntry() {
             return; // Editing the action updates its descriptor without modifying the document.
         }
         cfg.putScriptSettings(false);
+        checkAutoLayoutUpdates();
     }
     if (actionPlayback && cfg.lockForAction) validateLockedProfile(actionLayoutProfile);
     app.doProgress('Auto Layout', 'main();');
     if (!runSucceeded) { isCancelled = true; return; }
     if (!actionPlayback) cfg.putScriptSettings(true); // Recording publishes parameters only after a successful manual run.
+}
+
+// Updates are independent of layout settings and never recorded in Actions.
+function newerAutoLayoutVersion(candidate, current) {
+    if (!/^v?\d+(\.\d+)*$/.test(String(candidate)) || !/^v?\d+(\.\d+)*$/.test(String(current))) return false;
+    var a = String(candidate).replace(/^v/, '').split('.'), b = String(current).replace(/^v/, '').split('.');
+    for (var i = 0; i < Math.max(a.length, b.length); i++) {
+        var x = Number(a[i] || 0), y = Number(b[i] || 0);
+        if (x != y) return x > y;
+    }
+    return false;
+}
+
+function readAutoLayoutUpdateState() {
+    var state = { disabled: false, checked: 0, seen: '0' };
+    try {
+        var d = app.getCustomOptions(UUID + '-updates');
+        state.disabled = d.getBoolean(app.stringIDToTypeID('disabled'));
+        state.checked = d.getDouble(app.stringIDToTypeID('checked'));
+        state.seen = d.getString(app.stringIDToTypeID('seen'));
+    } catch (e) { }
+    return state;
+}
+
+function saveAutoLayoutUpdateState(state) {
+    var d = new ActionDescriptor();
+    d.putBoolean(app.stringIDToTypeID('disabled'), !!state.disabled);
+    d.putDouble(app.stringIDToTypeID('checked'), state.checked);
+    d.putString(app.stringIDToTypeID('seen'), String(state.seen));
+    app.putCustomOptions(UUID + '-updates', d, true);
+}
+
+function writeAutoLayoutUpdateFile(file, text, encoding) {
+    file.encoding = encoding || 'UTF-8';
+    if (!file.open('w')) throw new Error('Cannot write update file');
+    try { if (!file.write(text)) throw new Error('Cannot write update file'); }
+    finally { file.close(); }
+}
+
+function launchAutoLayoutUpdateCheck(folder) {
+    var ps = new File(folder.fsName + '/check.ps1'), launcher = new File(folder.fsName + '/check.vbs'),
+        destination = folder.fsName.replace(/'/g, "''") + '/release.json';
+    writeAutoLayoutUpdateFile(ps, '\uFEFF' + [
+        "$ErrorActionPreference = 'Stop'",
+        'try {',
+        '  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
+        "  $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/boogalooper/Auto-layout/releases/latest' -Headers @{Accept='application/vnd.github+json'; 'User-Agent'='Auto-layout-update-check'} -TimeoutSec 8",
+        '  if (-not $r.draft -and -not $r.prerelease) {',
+        "    $json = @{tag_name=$r.tag_name; body=$r.body; draft=$false; prerelease=$false} | ConvertTo-Json -Compress",
+        "    $path = '" + destination + "'",
+        '    [IO.File]::WriteAllText($path + \'.tmp\', $json, (New-Object Text.UTF8Encoding($false)))',
+        "    Move-Item -LiteralPath ($path + '.tmp') -Destination $path -Force",
+        '  }',
+        '} catch { }'
+    ].join('\r\n'));
+    var command = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ps.fsName + '"';
+    writeAutoLayoutUpdateFile(launcher, 'CreateObject("WScript.Shell").Run "' + command.replace(/"/g, '""') + '", 0, False\r\n', 'UTF-16');
+    return launcher.execute();
+}
+
+function showAutoLayoutUpdate(release, state, folder) {
+    var tag = String(release.tag_name), url = 'https://github.com/boogalooper/Auto-layout/releases/tag/' + tag,
+        win = new Window('dialog', str.t('Обновление Auto Layout', 'Auto Layout update'));
+    win.orientation = 'column'; win.alignChildren = ['fill', 'top']; win.margins = 16;
+    win.add('statictext', undefined, str.t('Доступна версия ', 'Version available: ') + tag + str.t(' (установлена ', ' (installed: ') + ver + ')');
+    var notes = win.add('edittext', undefined, typeof release.body == 'string' && release.body ? release.body : str.t('Описание релиза не указано.', 'No release notes provided.'),
+        { multiline: true, readonly: true, scrolling: true });
+    notes.preferredSize = [540, 300];
+    var disabled = win.add('checkbox', undefined, str.t('Не проверять обновления', 'Do not check for updates')),
+        buttons = win.add('group'),
+        open = buttons.add('button', undefined, str.t('Открыть страницу релиза', 'Open release page'), { name: 'ok' });
+    buttons.add('button', undefined, str.t('Отмена', 'Cancel'), { name: 'cancel' });
+    open.onClick = function () { win.close(1); };
+    var result = win.show();
+    state.seen = tag; state.disabled = !!disabled.value;
+    saveAutoLayoutUpdateState(state);
+    if (result == 1) {
+        var shortcut = new File(folder.fsName + '/release.url');
+        writeAutoLayoutUpdateFile(shortcut, '[InternetShortcut]\r\nURL=' + url + '\r\n');
+        shortcut.execute();
+    }
+}
+
+function checkAutoLayoutUpdates() {
+    try {
+        if (actionPlayback || String($.os).toLowerCase().indexOf('windows') < 0) return;
+        var state = readAutoLayoutUpdateState();
+        if (state.disabled) return;
+        var folder = new Folder(Folder.userData.fsName + '/AutoLayoutUpdates');
+        if (!folder.exists && !folder.create()) return;
+        var cached = new File(folder.fsName + '/release.json'), release = null;
+        if (cached.exists && cached.length < 1048576) {
+            cached.encoding = 'UTF-8';
+            if (cached.open('r')) {
+                try { release = parseJSONData(cached.read().replace(/^\uFEFF/, '')); }
+                catch (cacheError) { release = null; }
+                finally { cached.close(); }
+            }
+        }
+        if (release && release.draft === false && release.prerelease === false &&
+            newerAutoLayoutVersion(release.tag_name, ver) && newerAutoLayoutVersion(release.tag_name, state.seen))
+            showAutoLayoutUpdate(release, state, folder);
+        if (state.disabled) return;
+        var now = (new Date()).getTime();
+        if (!isFinite(state.checked) || now < state.checked || now - state.checked >= 86400000) {
+            state.checked = now;
+            saveAutoLayoutUpdateState(state);
+            launchAutoLayoutUpdateCheck(folder);
+        }
+    } catch (updateError) { } // Optional network/UI failures must never affect layout.
 }
 
 function lockedLayoutActive() {
