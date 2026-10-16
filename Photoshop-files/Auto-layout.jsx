@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.45',
+const ver = '0.10.46',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -316,10 +316,20 @@ function writeUpdateFile(file, text, encoding) {
 function updateFolder() {
     var local = $.getenv('LOCALAPPDATA');
     if (!local) return null;
-    var parent = new Folder(local + '/JazzyScripts');
-    if (!parent.exists && !parent.create()) return null;
-    var folder = new Folder(parent.fsName + '/AutoLayoutUpdates');
-    return folder.exists || folder.create() ? folder : null;
+    var environment = new Folder(local + '/JazzyScripts/AutoLayoutRuntime/venv');
+    if (!environment.exists) return null;
+    var folder = new Folder(environment.fsName + '/updates');
+    if (!folder.exists && !folder.create()) return null;
+    var previous = new Folder(local + '/JazzyScripts/AutoLayoutUpdates');
+    if (previous.exists) {
+        var names = ['settings.json', 'checked.json', 'release.json', 'release.url'];
+        for (var i = 0; i < names.length; i++) {
+            var source = new File(previous.fsName + '/' + names[i]), destination = new File(folder.fsName + '/' + names[i]);
+            if (source.exists && (destination.exists || source.copy(destination.fsName))) source.remove();
+        }
+        previous.remove();
+    }
+    return folder;
 }
 
 function setUpdateBusy(busy) {

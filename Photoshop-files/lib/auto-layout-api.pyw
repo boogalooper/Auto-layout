@@ -81,7 +81,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.45"
+SERVER_ID = "auto-layout/0.10.46"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -2254,10 +2254,7 @@ def check_release_in_background(folder):
 
 
 def update_worker():
-    local = os.environ.get("LOCALAPPDATA")
-    if not local:
-        return
-    folder = os.path.join(local, "JazzyScripts", "AutoLayoutUpdates")
+    folder = os.path.join(sys.prefix, "updates")
     while not shutdown_event.wait(5):
         try:
             check_release_in_background(folder)
