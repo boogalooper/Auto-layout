@@ -80,7 +80,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.35"
+SERVER_ID = "auto-layout/0.10.36"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -2081,10 +2081,13 @@ def handle_client(client_socket):
         if kind == "cleanup":
             reply("answer", queue_preview_cleanup(message.get("message")))
             return
-        if kind == "alphabet_names":
+        if kind in ("alphabet_names", "gender_names"):
             rows = message.get("message")
-            if not isinstance(rows, list) or not 1 <= len(rows) <= 500:
+            alphabetical = kind == "alphabet_names"
+            if alphabetical and (not isinstance(rows, list) or not 1 <= len(rows) <= 500):
                 raise ValueError("alphabet_names payload must contain 1..500 entries")
+            if not isinstance(rows, list):
+                raise ValueError("gender_names payload must be a list")
             state = register_active_request(request_id)
             try:
                 result, seen = [], set()
@@ -2092,32 +2095,18 @@ def handle_client(client_socket):
                     if request_cancelled(state):
                         reply("cancelled", "Operation cancelled")
                         return
-                    if (not isinstance(row, dict) or type(row.get("id")) is not int or
-                            row["id"] in seen or not isinstance(row.get("name"), str) or len(row["name"]) > 4096):
-                        raise ValueError("Invalid alphabetical name entry")
-                    seen.add(row["id"])
-                    result.append(dict(id=row["id"], **alphabetical_name_key(row["name"])))
-                reply("cancelled", "Operation cancelled") if request_cancelled(state) else reply("answer", result)
-            finally:
-                unregister_active_request(request_id)
-                last_request_time = time.monotonic()
-            return
-        if kind == "gender_names":
-            rows = message.get("message")
-            if not isinstance(rows, list):
-                raise ValueError("gender_names payload must be a list")
-            state = register_active_request(request_id)
-            try:
-                result = []
-                for row in rows:
-                    if request_cancelled(state):
-                        reply("cancelled", "Operation cancelled")
-                        return
-                    if not isinstance(row, dict):
-                        raise ValueError("gender_names entries must be objects")
-                    answer = classify_name(row.get("name", ""))
-                    answer["id"] = row.get("id")
-                    log_gender_result(row.get("name", ""), answer, request_id, "name")
+                    if alphabetical:
+                        if (not isinstance(row, dict) or type(row.get("id")) is not int or
+                                row["id"] in seen or not isinstance(row.get("name"), str) or len(row["name"]) > 4096):
+                            raise ValueError("Invalid alphabetical name entry")
+                        seen.add(row["id"])
+                        answer = dict(id=row["id"], **alphabetical_name_key(row["name"]))
+                    else:
+                        if not isinstance(row, dict):
+                            raise ValueError("gender_names entries must be objects")
+                        answer = classify_name(row.get("name", ""))
+                        answer["id"] = row.get("id")
+                        log_gender_result(row.get("name", ""), answer, request_id, "name")
                     result.append(answer)
                 if request_cancelled(state):
                     reply("cancelled", "Operation cancelled")
@@ -2127,54 +2116,42 @@ def handle_client(client_socket):
                 unregister_active_request(request_id)
                 last_request_time = time.monotonic()
             return
-        if kind in ("layout_zones", "layout_composition"):
+        if kind in ("layout_zones", "layout_composition", "analyze_image"):
             state = register_active_request(request_id)
             if not request_lock.acquire(False):
                 unregister_active_request(request_id)
                 reply("error", "Analysis is busy; wait for the previous request to finish.")
                 return
             try:
-                answer = (calculate_composition_layout if kind == "layout_composition" else calculate_zone_layout)(message.get("message"), state)
+                if kind == "analyze_image":
+                    if request_cancelled(state):
+                        reply("cancelled", "Operation cancelled")
+                        return
+                    payload = message.get("message") or {}
+                    if not isinstance(payload, dict):
+                        raise ValueError(kind + " payload must be an object")
+                    answer = analyze_photo(payload, state)
+                    if answer.get("gender"):
+                        answer["gender"]["id"] = payload.get("id")
+                        log_gender_result(payload.get("name", ""), answer["gender"], request_id, "image")
+                    if answer.get("color"):
+                        logging.info("color_result %s", json.dumps(dict(request_id=request_id,
+                            id=payload.get("id"), **answer["color"]), ensure_ascii=False, allow_nan=False))
+                    if answer.get("head_turn"):
+                        logging.info("head_turn_result %s", json.dumps(dict(
+                            request_id=request_id, id=payload.get("id"), name=payload.get("name", ""),
+                            **answer["head_turn"]), ensure_ascii=False, allow_nan=False))
+                else:
+                    solver = calculate_composition_layout if kind == "layout_composition" else calculate_zone_layout
+                    answer = solver(message.get("message"), state)
                 if request_cancelled(state):
                     reply("cancelled", "Operation cancelled")
                 else:
                     reply("answer", answer)
             except InterruptedError:
+                if kind == "analyze_image":
+                    raise
                 reply("cancelled", "Operation cancelled")
-            finally:
-                unregister_active_request(request_id)
-                last_request_time = time.monotonic()
-                request_lock.release()
-                flush_preview_cleanup()
-            return
-        if kind == "analyze_image":
-            state = register_active_request(request_id)
-            if not request_lock.acquire(False):
-                unregister_active_request(request_id)
-                reply("error", "Analysis is busy; wait for the previous request to finish.")
-                return
-            try:
-                if request_cancelled(state):
-                    reply("cancelled", "Operation cancelled")
-                    return
-                payload = message.get("message") or {}
-                if not isinstance(payload, dict):
-                    raise ValueError(kind + " payload must be an object")
-                answer = analyze_photo(payload, state)
-                if answer.get("gender"):
-                    answer["gender"]["id"] = payload.get("id")
-                    log_gender_result(payload.get("name", ""), answer["gender"], request_id, "image")
-                if answer.get("color"):
-                    logging.info("color_result %s", json.dumps(dict(request_id=request_id,
-                        id=payload.get("id"), **answer["color"]), ensure_ascii=False, allow_nan=False))
-                if answer.get("head_turn"):
-                    logging.info("head_turn_result %s", json.dumps(dict(
-                        request_id=request_id, id=payload.get("id"), name=payload.get("name", ""),
-                        **answer["head_turn"]), ensure_ascii=False, allow_nan=False))
-                if request_cancelled(state):
-                    reply("cancelled", "Operation cancelled")
-                else:
-                    reply("answer", answer)
             finally:
                 unregister_active_request(request_id)
                 last_request_time = time.monotonic()

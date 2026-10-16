@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.35 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.36 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -44,7 +44,7 @@
 
 $.localize = true;
 
-var ver = '0.10.35',
+var ver = '0.10.36',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -624,8 +624,6 @@ function dialog(editingAction) {
     dlAlphabet.helpTip = str.alphabetTip;
     chNoEnlarge.text = str.t('Не увеличивать размер слоёв', 'Do not enlarge layers');
     chNoEnlarge.helpTip = str.t('Масштаб не выше 100%. Уменьшение разрешено, увеличение запрещено. Если объекты уже помещаются, геометрический расчёт сохраняет их размер.', 'Scale is capped at 100%. Shrinking is allowed, enlargement is disabled. Geometry preserves the current sizes when they already fit.');
-    chNoEnlarge.value = !!cfg.noEnlarge;
-    chNoEnlarge.onClick = function () { cfg.noEnlarge = this.value; };
     chPythonPacking.text = str.pythonPacking;
     chPythonPacking.helpTip = str.pythonPackingTip;
     chAlternateGender.text = str.alternateGender
@@ -634,8 +632,6 @@ function dialog(editingAction) {
     chGroupRows.text = str.groupRows
     ok.text = editingAction ? str.saveAction : str.layoutLayers
     chLockAction.text = str.lockAction
-    chLockAction.value = !!cfg.lockForAction;
-    chLockAction.onClick = function () { cfg.lockForAction = !!this.value; updateAdditionalEnabled(); };
     chLockAction.helpTip = str.lockActionTip;
     if (editingAction && !cfg.lockForAction && !actionLayoutProfile) {
         chLockAction.enabled = false;
@@ -643,11 +639,12 @@ function dialog(editingAction) {
     }
     cancel.text = str.cancel
 
-    chAutoRows.value = cfg.autoRows
     edRows.text = cfg.rows
     edRows.enabled = !cfg.autoRows
-    setRhythmSelection()
-    setAlignmentSelection()
+    var rhythmValues = ['auto', 'centerWide', 'edgesWide', 'alternateWide', 'alternateNarrow'],
+        alignmentValues = ['left', 'center', 'right', 'justify'];
+    setChoice(dlRhythm, rhythmValues, cfg.rowRhythm, 0);
+    setChoice(dlAlign, alignmentValues, cfg.horizontalAlign, 1);
     slGapX.value = cfg.gapX
     slGapY.value = cfg.gapY
     slGapMax.value = cfg.maxGapMultiplier
@@ -662,17 +659,24 @@ function dialog(editingAction) {
         if (dlColor.selection) cfg.colorMode = colorModeFromSelection(dlColor.selection);
     };
     dlColor.helpTip = str.colorTip;
-    chPythonPacking.value = cfg.pythonPacking;
-    chPythonPacking.onClick = function () { cfg.pythonPacking = this.value; };
-    chHeadTurn.value = cfg.considerHeadTurn;
     chHeadTurn.enabled = headAvailability.available;
-    chAlternateGender.value = cfg.alternateGender
     chAlternateGender.enabled = pythonAvailability.available
     stPythonStatus.visible = !pythonAvailability.available || !headAvailability.available || !!headAvailability.message
     stPythonStatus.text = pythonAvailability.available ? headAvailability.message :
         str.pythonUnavailablePrefix + pythonAvailability.message + '\n' + str.geometryWithoutPython
     if (!stPythonStatus.visible) pnAdditional.remove(stPythonStatus);
-    chGroupRows.value = cfg.groupRows
+    var checkboxSettings = [
+        [chNoEnlarge, 'noEnlarge'], [chAutoRows, 'autoRows'],
+        [chPythonPacking, 'pythonPacking'], [chAlternateGender, 'alternateGender'],
+        [chHeadTurn, 'considerHeadTurn'], [chGroupRows, 'groupRows'], [chLockAction, 'lockForAction']
+    ];
+    function bindCheckbox(control, key) {
+        control.value = !!cfg[key];
+        control.onClick = function () { cfg[key] = !!this.value; };
+    }
+    for (var cb = 0; cb < checkboxSettings.length; cb++)
+        bindCheckbox(checkboxSettings[cb][0], checkboxSettings[cb][1]);
+    chLockAction.onClick = function () { cfg.lockForAction = !!this.value; updateAdditionalEnabled(); };
     dlAlphabet.selection = dlAlphabet.items[cfg.alphabetOrder == 'page' ? 1 : cfg.alphabetOrder == 'zone' ? 2 : 0];
     dlAlphabet.enabled = true; // Always allow disabling a saved mode if Python is unavailable.
     dlAlphabet.onChange = function () { readAlphabetSelection(); updateAdditionalEnabled(); };
@@ -716,10 +720,10 @@ function dialog(editingAction) {
         return fallback;
     }
     function readRhythmSelection() {
-        cfg.rowRhythm = readChoice(dlRhythm, ['auto', 'centerWide', 'edgesWide', 'alternateWide', 'alternateNarrow'], 'auto');
+        cfg.rowRhythm = readChoice(dlRhythm, rhythmValues, 'auto');
     }
     function readAlignmentSelection() {
-        cfg.horizontalAlign = readChoice(dlAlign, ['left', 'center', 'right', 'justify'], 'center');
+        cfg.horizontalAlign = readChoice(dlAlign, alignmentValues, 'center');
     }
     dlRhythm.onChange = readRhythmSelection;
     dlAlign.onChange = function () { readAlignmentSelection(); updateGapMaxTitle(); };
@@ -743,24 +747,15 @@ function dialog(editingAction) {
     }
     slGapMax.onChange = slGapMax.onChanging
 
-    chAlternateGender.onClick = function () { cfg.alternateGender = this.value }
-    chHeadTurn.onClick = function () { cfg.considerHeadTurn = this.value }
-    chGroupRows.onClick = function () { cfg.groupRows = this.value }
-
     ok.onClick = function () {
         cfg.priorityStartLabel = priorityDropdownValue(dlPriorityStart);
         cfg.priorityEndLabel = priorityDropdownValue(dlPriorityEnd);
         try { validatePrioritySettings(); } catch (priorityError) { alert(priorityError.message, 'Auto layout'); return; }
         // Read every visible control on OK. ScriptUI event delivery must not
         // determine either the saved settings or the options used for this run.
-        cfg.noEnlarge = !!chNoEnlarge.value;
-        cfg.autoRows = !!chAutoRows.value;
+        for (var cb = 0; cb < checkboxSettings.length; cb++)
+            cfg[checkboxSettings[cb][1]] = !!checkboxSettings[cb][0].value;
         cfg.rows = Math.max(1, Math.min(999, Math.round(Number(edRows.text) || 1)));
-        cfg.pythonPacking = !!chPythonPacking.value;
-        cfg.alternateGender = !!chAlternateGender.value;
-        cfg.considerHeadTurn = !!chHeadTurn.value;
-        cfg.groupRows = !!chGroupRows.value;
-        cfg.lockForAction = !!chLockAction.value;
         cfg.gapX = Math.max(0, Math.min(30, Math.round(Number(slGapX.value) * 10) / 10 || 0));
         cfg.gapY = Math.max(0, Math.min(30, Math.round(Number(slGapY.value) * 10) / 10 || 0));
         cfg.maxGapMultiplier = Math.max(1, Math.min(4, Math.round(Number(slGapMax.value) || 1)));
@@ -780,23 +775,10 @@ function dialog(editingAction) {
         ok.enabled = editingAction || canRun()
     }
 
-    function setRhythmSelection() {
-        switch (cfg.rowRhythm) {
-            case 'centerWide': dlRhythm.selection = 1; break;
-            case 'edgesWide': dlRhythm.selection = 2; break;
-            case 'alternateWide': dlRhythm.selection = 3; break;
-            case 'alternateNarrow': dlRhythm.selection = 4; break;
-            default: dlRhythm.selection = 0; break;
-        }
-    }
-
-    function setAlignmentSelection() {
-        switch (cfg.horizontalAlign) {
-            case 'left': dlAlign.selection = 0; break;
-            case 'right': dlAlign.selection = 2; break;
-            case 'justify': dlAlign.selection = 3; break;
-            default: dlAlign.selection = 1; break;
-        }
+    function setChoice(control, values, value, fallback) {
+        var index = fallback;
+        for (var i = 0; i < values.length; i++) if (values[i] == value) { index = i; break; }
+        control.selection = index;
     }
 
     function updateGapLabels() {
@@ -3150,17 +3132,46 @@ function cleanupPreviews() {
 
 // Assign children to a valid geometric skeleton, then reflow the SAME row count,
 // scale and gaps. This permits useful cross-row swaps of different-size photos.
+function measureLayoutRow(items) {
+    var width = 0, height = 0;
+    for (var i = 0; i < items.length; i++) {
+        width += items[i].width;
+        height = Math.max(height, items[i].height);
+    }
+    return { items: items, contentWidth: width, rowHeight: height };
+}
+
+function assignedRowSpec(items, original) {
+    var spec = measureLayoutRow(items);
+    spec.interval = original.availableInterval;
+    spec.top = original.y;
+    spec.zoneIndex = original.zoneIndex;
+    spec.componentIndex = original.componentIndex;
+    return spec;
+}
+
+function setClosestRowRange(spec, geometry, scale, width, top) {
+    var ranges = getFastRowTopRanges(geometry, spec.rowHeight * scale, width),
+        closest = null, distance = 1e100;
+    for (var i = 0; i < ranges.length; i++) {
+        var range = ranges[i], d = Math.max(range.topMin - top, top - range.topMax, 0);
+        if (d < distance) { distance = d; closest = range; }
+    }
+    if (!closest) return false;
+    spec.allowedTopMin = closest.topMin;
+    spec.allowedTopMax = closest.topMax;
+    spec.interval = closest.interval;
+    return true;
+}
+
 function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
     if (!priorityOrderValid(itemRows)) return null;
     var specs = [], fixed = { minFinalGapX: plan.minFinalGapX, actualGapX: plan.actualGapXMin,
         actualGapXMin: plan.actualGapXMin, actualGapXMax: plan.actualGapXMax, byRow: {} }, r, c;
     for (r = 0; r < itemRows.length; r++) {
-        var original = plan.rows[r], width = 0, height = 0, count = itemRows[r].length,
+        var original = plan.rows[r], spec = assignedRowSpec(itemRows[r], original),
+            width = spec.contentWidth, count = itemRows[r].length,
             intervalWidth = original.availableInterval.right - original.availableInterval.left;
-        for (c = 0; c < count; c++) {
-            width += itemRows[r][c].width;
-            height = Math.max(height, itemRows[r][c].height);
-        }
         fixed.byRow[String(r)] = original.gapX;
         // Left / Center / Right preserve one common visual gap during semantic swaps.
         // Unlocked Justify is different: its gap is recalculated from the FINAL
@@ -3169,9 +3180,7 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
             width * plan.commonScale + original.gapX * Math.max(0, count - 1) > intervalWidth + 1e-7) return null;
         if (cfg.horizontalAlign == 'justify' && count > 1 &&
             width * plan.commonScale + plan.minFinalGapX * (count - 1) > intervalWidth + 1e-7) return null;
-        specs.push({ items: itemRows[r], contentWidth: width, rowHeight: height,
-            interval: original.availableInterval, top: original.y,
-            zoneIndex: original.zoneIndex, componentIndex: original.componentIndex });
+        specs.push(spec);
     }
     if (geometry.isRectangle) {
         var indices = [];
@@ -3193,17 +3202,10 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
     } else {
         indices = [];
         for (r = 0; r < specs.length; r++) {
-            var spec = specs[r], semanticGap = cfg.horizontalAlign == 'justify' ? plan.minFinalGapX : plan.rows[r].gapX,
-                needed = spec.contentWidth * plan.commonScale + semanticGap * Math.max(0, spec.items.length - 1),
-                ranges = getFastRowTopRanges(geometry, spec.rowHeight * plan.commonScale, needed), closest = null, distance = 1e100;
-            for (var k = 0; k < ranges.length; k++) {
-                var range = ranges[k], d = Math.max(range.topMin - plan.rows[r].y, plan.rows[r].y - range.topMax, 0);
-                if (d < distance) { distance = d; closest = range; }
-            }
-            if (!closest) return null;
-            spec.allowedTopMin = closest.topMin;
-            spec.allowedTopMax = closest.topMax;
-            spec.interval = closest.interval;
+            spec = specs[r];
+            var semanticGap = cfg.horizontalAlign == 'justify' ? plan.minFinalGapX : plan.rows[r].gapX,
+                needed = spec.contentWidth * plan.commonScale + semanticGap * Math.max(0, spec.items.length - 1);
+            if (!setClosestRowRange(spec, geometry, plan.commonScale, needed, plan.rows[r].y)) return null;
             indices.push(r);
         }
         if (!placeRangeVerticalGroup(specs, indices, plan.commonScale, plan.actualGapY, geometry.bounds.top, geometry.bounds.bottom)) return null;
@@ -4094,31 +4096,16 @@ function buildRectangularLayoutCandidate(items, geometry, distribution, baseGapX
         index = 0,
         maxMinRowWidth = 0,
         minLayoutHeight = 0,
-        r, i;
+        r;
 
     for (r = 0; r < distribution.length; r++) {
-        var count = distribution[r],
-            rowItems = [],
-            contentWidth = 0,
-            rowHeight = 0;
-
-        for (i = 0; i < count; i++) {
-            var item = items[index++];
-            rowItems.push(item);
-            contentWidth += item.width;
-            if (item.height > rowHeight) rowHeight = item.height;
-        }
-
-        var minRowWidth = contentWidth + Math.max(0, count - 1) * baseGapX;
+        var count = distribution[r], spec = measureLayoutRow(items.slice(index, index + count));
+        index += count;
+        var minRowWidth = spec.contentWidth + Math.max(0, count - 1) * baseGapX;
         if (minRowWidth > maxMinRowWidth) maxMinRowWidth = minRowWidth;
-        minLayoutHeight += rowHeight;
-
-        rowSpecs.push({
-            items: rowItems,
-            contentWidth: contentWidth,
-            rowHeight: rowHeight,
-            interval: { left: geometry.bounds.left, right: geometry.bounds.right }
-        });
+        minLayoutHeight += spec.rowHeight;
+        spec.interval = { left: geometry.bounds.left, right: geometry.bounds.right };
+        rowSpecs.push(spec);
     }
 
     if (rowSpecs.length > 1) minLayoutHeight += baseGapY * (rowSpecs.length - 1);
@@ -5629,24 +5616,12 @@ function improveVerticalCounts(counts, mode, feasible, tick) {
 function reflowVerticalRows(plan, geometry, itemRows, scale) {
     if (plan.lockedMetrics) return rebuildAssignedLayout(plan, geometry, itemRows, true);
     if (!priorityOrderValid(itemRows)) return null;
-    var specs = [], groups = [], byZone = {}, r, i;
+    var specs = [], groups = [], byZone = {}, r;
     for (r = 0; r < itemRows.length; r++) {
-        var old = plan.rows[r], width = 0, height = 0;
-        for (i = 0; i < itemRows[r].length; i++) {
-            width += itemRows[r][i].width; height = Math.max(height, itemRows[r][i].height);
-        }
-        var spec = { items: itemRows[r], contentWidth: width, rowHeight: height,
-            interval: old.availableInterval, top: old.y, zoneIndex: old.zoneIndex, componentIndex: old.componentIndex };
-        if (!geometry.isRectangle && !geometry.multiZone) {
-            var ranges = getFastRowTopRanges(geometry, height * scale,
-                (width + plan.baseGapX * (itemRows[r].length - 1)) * scale), closest = null, distance = 1e100;
-            for (i = 0; i < ranges.length; i++) {
-                var d = Math.max(ranges[i].topMin - old.y, old.y - ranges[i].topMax, 0);
-                if (d < distance) { distance = d; closest = ranges[i]; }
-            }
-            if (!closest) return null;
-            spec.allowedTopMin = closest.topMin; spec.allowedTopMax = closest.topMax; spec.interval = closest.interval;
-        }
+        var old = plan.rows[r], spec = assignedRowSpec(itemRows[r], old);
+        if (!geometry.isRectangle && !geometry.multiZone &&
+            !setClosestRowRange(spec, geometry, scale,
+                (spec.contentWidth + plan.baseGapX * (itemRows[r].length - 1)) * scale, old.y)) return null;
         specs.push(spec);
         var key = geometry.multiZone ? String(old.zoneIndex) : 'all';
         if (!byZone[key]) byZone[key] = [];
