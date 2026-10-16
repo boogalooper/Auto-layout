@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.41',
+const ver = '0.10.42',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -272,10 +272,11 @@ function init() {
             return;
         }
         cfg.putSettings(false);
-        checkUpdates();
     }
     if (actionMode && cfg.lockForAction) validateActionProfile(actionProfile);
-    app.doProgress('Auto Layout', 'main();');
+    setUpdateBusy(true);
+    try { app.doProgress('Auto Layout', 'main();'); }
+    finally { setUpdateBusy(false); }
     if (!success) { isCancelled = true; return; }
     if (!actionMode) cfg.putSettings(true);
 }
@@ -291,11 +292,10 @@ function isNewerVersion(candidate, current) {
 }
 
 function getUpdateState() {
-    var state = { disabled: false, checked: 0, seen: '0' };
+    var state = { disabled: false, seen: '0' };
     try {
         var d = app.getCustomOptions(UUID + '-updates');
         state.disabled = d.getBoolean(s2t('disabled'));
-        state.checked = d.getDouble(s2t('checked'));
         state.seen = d.getString(s2t('seen'));
     } catch (e) { }
     return state;
@@ -304,7 +304,6 @@ function getUpdateState() {
 function saveUpdateState(state) {
     var d = new ActionDescriptor;
     d.putBoolean(s2t('disabled'), !!state.disabled);
-    d.putDouble(s2t('checked'), state.checked);
     d.putString(s2t('seen'), String(state.seen));
     app.putCustomOptions(UUID + '-updates', d, true);
 }
@@ -316,25 +315,23 @@ function writeUpdateFile(file, text, encoding) {
     finally { file.close(); }
 }
 
-function launchUpdateCheck(folder) {
-    var ps = new File(folder.fsName + '/check.ps1'), launcher = new File(folder.fsName + '/check.vbs'),
-        destination = folder.fsName.replace(/'/g, "''") + '/release.json';
-    writeUpdateFile(ps, '\uFEFF' + [
-        "$ErrorActionPreference = 'Stop'",
-        'try {',
-        '  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
-        "  $r = Invoke-RestMethod -Uri 'https://api.github.com/repos/boogalooper/Auto-layout/releases/latest' -Headers @{Accept='application/vnd.github+json'; 'User-Agent'='Auto-layout-update-check'} -TimeoutSec 8",
-        '  if (-not $r.draft -and -not $r.prerelease) {',
-        "    $json = @{tag_name=$r.tag_name; body=$r.body; draft=$false; prerelease=$false} | ConvertTo-Json -Compress",
-        "    $path = '" + destination + "'",
-        '    [IO.File]::WriteAllText($path + \'.tmp\', $json, (New-Object Text.UTF8Encoding($false)))',
-        "    Move-Item -LiteralPath ($path + '.tmp') -Destination $path -Force",
-        '  }',
-        '} catch { }'
-    ].join('\r\n'));
-    var command = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ps.fsName + '"';
-    writeUpdateFile(launcher, 'CreateObject("WScript.Shell").Run "' + command.replace(/"/g, '""') + '", 0, False\r\n', 'UTF-16');
-    return launcher.execute();
+function updateFolder() {
+    var local = $.getenv('LOCALAPPDATA');
+    if (!local) return null;
+    var parent = new Folder(local + '/JazzyScripts');
+    if (!parent.exists && !parent.create()) return null;
+    var folder = new Folder(parent.fsName + '/AutoLayoutUpdates');
+    return folder.exists || folder.create() ? folder : null;
+}
+
+function setUpdateBusy(busy) {
+    try {
+        var folder = updateFolder();
+        if (!folder) return;
+        writeUpdateFile(new File(folder.fsName + '/settings.json'), objectToJSON({
+            disabled: getUpdateState().disabled, enabled: py.wasUsed(), busy: !!busy, updated: (new Date).getTime()
+        }));
+    } catch (e) { }
 }
 
 function showUpdate(release, state, folder) {
@@ -353,6 +350,7 @@ function showUpdate(release, state, folder) {
     var result = win.show();
     state.seen = tag; state.disabled = !!disabled.value;
     saveUpdateState(state);
+    setUpdateBusy(false);
     if (result == 1) {
         var shortcut = new File(folder.fsName + '/release.url');
         writeUpdateFile(shortcut, '[InternetShortcut]\r\nURL=' + url + '\r\n');
@@ -363,10 +361,9 @@ function showUpdate(release, state, folder) {
 function checkUpdates() {
     try {
         if (actionMode || String($.os).toLowerCase().indexOf('windows') < 0) return;
-        var state = getUpdateState();
-        if (state.disabled) return;
-        var folder = new Folder(Folder.userData.fsName + '/AutoLayoutUpdates');
-        if (!folder.exists && !folder.create()) return;
+        setUpdateBusy(false);
+        var state = getUpdateState(), folder = updateFolder();
+        if (state.disabled || !folder) return;
         var cached = new File(folder.fsName + '/release.json'), release = null;
         if (cached.exists && cached.length < 1048576) {
             cached.encoding = 'UTF-8';
@@ -379,13 +376,6 @@ function checkUpdates() {
         if (release && release.draft === false && release.prerelease === false &&
             isNewerVersion(release.tag_name, ver) && isNewerVersion(release.tag_name, state.seen))
             showUpdate(release, state, folder);
-        if (state.disabled) return;
-        var now = (new Date).getTime();
-        if (!isFinite(state.checked) || now < state.checked || now - state.checked >= 86400000) {
-            state.checked = now;
-            saveUpdateState(state);
-            launchUpdateCheck(folder);
-        }
     } catch (updateError) { }
 }
 
@@ -6302,6 +6292,8 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
         } catch (e) { }
         return localAvailability();
     };
+
+    this.wasUsed = function () { return !!(initializationResult && initializationResult.ok); };
 
     this.tryInit = function () {
         if (initializationResult) return initializationResult;

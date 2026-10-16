@@ -9,6 +9,7 @@ import re
 import logging
 import math
 import itertools
+import urllib.request
 from functools import lru_cache
 from importlib import resources
 from logging.handlers import RotatingFileHandler
@@ -80,7 +81,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.41"
+SERVER_ID = "auto-layout/0.10.42"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -2168,10 +2169,108 @@ def handle_client(client_socket):
             pass
 
 
+UPDATE_INTERVAL = 24 * 60 * 60
+UPDATE_IDLE = 15
+UPDATE_LIMIT = 1048576
+pending_update = None
+
+
+def read_update_json(path):
+    try:
+        with open(path, "rb") as stream:
+            data = stream.read(UPDATE_LIMIT + 1)
+        if len(data) > UPDATE_LIMIT:
+            return None
+        value = json.loads(data.decode("utf-8-sig"))
+        return value if isinstance(value, dict) else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def write_update_json(path, value):
+    temporary = path + ".tmp"
+    try:
+        with open(temporary, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, ensure_ascii=False, allow_nan=False)
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+
+
+def updates_allowed(folder):
+    settings = read_update_json(os.path.join(folder, "settings.json"))
+    # Missing or partially written preferences are retried on the next idle tick.
+    if not settings or settings.get("disabled") is not False or settings.get("enabled") is not True or settings.get("busy") is not False:
+        return False
+    updated = settings.get("updated")
+    if not isinstance(updated, (int, float)) or not math.isfinite(updated):
+        return False
+    age = time.time() - updated / 1000
+    if 0 <= age < UPDATE_IDLE:
+        return False
+    with active_requests_lock:
+        if active_requests:
+            return False
+    return not request_lock.locked() and time.monotonic() - last_request_time >= UPDATE_IDLE
+
+
+def check_release_in_background(folder):
+    global pending_update
+    if not updates_allowed(folder) or shutdown_event.is_set():
+        return
+    if pending_update is not None:
+        write_update_json(os.path.join(folder, "release.json"), pending_update)
+        pending_update = None
+    stamp = os.path.join(folder, "checked.json")
+    previous = (read_update_json(stamp) or {}).get("checked", 0)
+    now = time.time()
+    if isinstance(previous, (int, float)) and math.isfinite(previous) and 0 <= now - previous < UPDATE_INTERVAL:
+        return
+    # Failed requests also observe the daily limit; no repeated network retries.
+    write_update_json(stamp, {"checked": now})
+    request = urllib.request.Request(
+        "https://api.github.com/repos/boogalooper/Auto-layout/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "Auto-layout-update-check"})
+    with urllib.request.urlopen(request, timeout=8) as response:
+        data = response.read(UPDATE_LIMIT + 1)
+    if len(data) > UPDATE_LIMIT:
+        return
+    release = json.loads(data.decode("utf-8"))
+    if (not isinstance(release, dict) or release.get("draft") is not False or
+            release.get("prerelease") is not False or
+            not isinstance(release.get("tag_name"), str) or
+            not re.fullmatch(r"v?\d+(?:\.\d+)*", release["tag_name"])):
+        return
+    body = release.get("body")
+    pending_update = dict(tag_name=release["tag_name"], body=body if isinstance(body, str) else "",
+                    draft=False, prerelease=False)
+    # A new layout or opt-out may have arrived while the network request ran.
+    if updates_allowed(folder) and not shutdown_event.is_set():
+        write_update_json(os.path.join(folder, "release.json"), pending_update)
+        pending_update = None
+
+
+def update_worker():
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return
+    folder = os.path.join(local, "JazzyScripts", "AutoLayoutUpdates")
+    while not shutdown_event.wait(5):
+        try:
+            check_release_in_background(folder)
+        except Exception:
+            # Updates never affect analysis or produce user-facing errors.
+            pass
+
+
 def start_server():
     global last_request_time
     last_request_time = time.monotonic()
     threading.Thread(target=cancellation_watchdog, daemon=True).start()
+    threading.Thread(target=update_worker, daemon=True, name="auto-layout-updates").start()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
             server.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
@@ -2193,6 +2292,7 @@ def start_server():
             with active_requests_lock:
                 has_active_requests = bool(active_requests)
             if not has_active_requests and not request_lock.locked() and time.monotonic() - last_request_time > TIMEOUT:
+                shutdown_event.set()
                 break
 
 
