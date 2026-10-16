@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.37 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.38 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -44,7 +44,7 @@
 
 $.localize = true;
 
-var ver = '0.10.37',
+var ver = '0.10.38',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -292,7 +292,7 @@ function runAutoLayoutEntry() {
     var editing = actionPlayback && app.playbackDisplayDialogs == DialogModes.ALL;
     if (!actionPlayback || editing) {
         var window = dialog(editing), result = window.show();
-        if (result == 2) { isCancelled = true; return; }
+        if (result !== 1) { isCancelled = true; return; }
         if (editing) {
             if (cfg.lockForAction) validateLockedProfile(actionLayoutProfile);
             cfg.putScriptSettings(true);
