@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.39',
+const ver = '0.10.41',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
