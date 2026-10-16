@@ -1,7 +1,5 @@
-CHANGES.md
-PROJECT_CONTEXT.md
 tests/
 benchmarks/
 verification/
-AUDIT.md
-PARAMETERS.md
+*.md
+!readme.md
