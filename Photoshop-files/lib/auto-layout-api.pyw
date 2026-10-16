@@ -80,7 +80,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.34"
+SERVER_ID = "auto-layout/0.10.35"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -1109,6 +1109,52 @@ def row_rhythm_profile(size, mode):
     return central if mode == "centerWide" else [1 - value for value in central]
 
 
+def vertical_row_score(counts, mode):
+    n = len(counts)
+    if not n: return (0,)
+    singles = sum(c == 1 for c in counts) if n > 1 else 0
+    excess = max(0, max(counts) - min(counts) - 2)
+    variance = sum(c*c for c in counts) - sum(counts)**2/n
+    mirror = tuple(abs(counts[i]-counts[n-1-i]) for i in range(n//2))
+    mirror += (0,) * (sum(counts)//2-len(mirror))
+    if mode == 'auto' or n <= 1: return (singles, excess, round(variance, 8)) + mirror
+    violations = severity = 0
+    middle = (n-1)/2
+    for i in range(1,n):
+        delta = counts[i]-counts[i-1]
+        if mode in ('alternateWide','alternateNarrow'):
+            wants_more = (i%2==0) == (mode=='alternateWide')
+            wrong = max(0,1-(delta if wants_more else -delta))
+        else:
+            toward = abs(i-middle)<abs(i-1-middle)
+            away = abs(i-middle)>abs(i-1-middle)
+            increase = toward if mode=='centerWide' else away
+            wrong = max(0,-delta if increase else delta) if toward or away else 0
+        if wrong: violations+=1;severity+=wrong
+    tie = -sum(c*p for c,p in zip(counts,row_rhythm_profile(n,mode)))
+    return (excess,singles,violations,severity) + mirror + (round(variance,8),round(tie,10))
+
+
+def improve_vertical_counts(counts, mode, feasible=None, check=None):
+    best = list(counts)
+    if mode == 'auto' or len(best)<=1:return best
+    score = vertical_row_score(best,mode)
+    for _ in range(min(12,len(best)*2)):
+        if check:check()
+        next_,next_score = best,score
+        for a in range(len(best)):
+            if best[a]<=1:continue
+            for b in range(len(best)):
+                if a==b:continue
+                trial=best.copy();trial[a]-=1;trial[b]+=1
+                quality=vertical_row_score(trial,mode)
+                if quality<next_score and (feasible is None or feasible(trial)):
+                    next_,next_score=trial,quality
+        if next_ is best:break
+        best,score=next_,next_score
+    return best
+
+
 def row_rhythm_cost(counts, mode):
     if mode == "auto" or len(counts) <= 1 or max(counts) == min(counts):
         return 0.0
@@ -1440,6 +1486,31 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
             width, height = metrics[start][count]
             row_specs.append(dict(zoneIndex=zi, ids=[i["id"] for i in order[start:start + count]], contentWidth=width, rowHeight=height))
             start += count
+    if rhythm != "auto":
+        initial_counts = [len(row["ids"]) for row in row_specs]
+        def rebuild_counts(counts):
+            specs, offset, groups = [], 0, {}
+            for old, count in zip(row_specs, counts):
+                zi = old["zoneIndex"]
+                groups.setdefault(zi, [0, 0.0, []])
+                groups[zi][0] += count
+                w, h = metrics[offset][count]
+                specs.append(dict(zoneIndex=zi, ids=[i["id"] for i in order[offset:offset+count]], contentWidth=w, rowHeight=h))
+                offset += count
+            for zi, amount, original in allocation[1]:
+                if sum(original) != groups.get(zi, [0])[0]: return None
+            minimum = scale * (1 - COMPOSITION_MAX_SCALE_LOSS)
+            for zi in groups:
+                selected = [row for row in specs if row["zoneIndex"] == zi]
+                if any((row["contentWidth"] + gx * (len(row["ids"])-1))*minimum > zones[zi]["width"]+1e-9 for row in selected): return None
+                if (sum(row["rowHeight"] for row in selected)+gy*(len(selected)-1))*minimum > zones[zi]["height"]+1e-9:return None
+            return specs
+        try:
+            refined = improve_vertical_counts(initial_counts, rhythm, lambda counts: rebuild_counts(counts) is not None, balance_check)
+            improved_specs = rebuild_counts(refined)
+            if improved_specs: row_specs = improved_specs
+        except TimeoutError:
+            budget_exhausted = True
     reference_scale = scale
     if rhythm != "auto":
         # Small caption/effect overhangs must not suppress the selected profile.
@@ -1624,7 +1695,7 @@ def calculate_composition_layout(payload, state, time_budget=14.0):
             previous = sexes
         # Geometric row quality and the user's rhythm precede optional
         # semantic objectives within the admitted 1% scale window.
-        return (row_quality(plan), row_rhythm_cost(counts, rhythm), bad, bad - good,
+        return ((row_quality(plan)[:2], vertical_row_score(counts, rhythm)) if rhythm != "auto" else (row_quality(plan), row_rhythm_cost(counts, rhythm))) + (bad, bad - good,
                 symmetry, round(minority_center, 8), -vertical, round(head, 9),
                 round(composition_color_cost(plan,by_id,color_mode,color_distances),9), -plan["commonScale"])
     def score_key(plan):
