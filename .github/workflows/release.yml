@@ -89,6 +89,7 @@ jobs:
 
           mkdir -p "${PACKAGE_DIR}/Photoshop-files/lib"
           cp "README.md" "${PACKAGE_DIR}/README.md"
+          cp -R "assets" "${PACKAGE_DIR}/assets"
           cp "install_runtime.bat" "${PACKAGE_DIR}/install_runtime.bat"
           cp "Photoshop-files/Auto-layout.jsx" "${PACKAGE_DIR}/Photoshop-files/Auto-layout.jsx"
           cp "Photoshop-files/lib/auto-layout-api.pyw" "${PACKAGE_DIR}/Photoshop-files/lib/auto-layout-api.pyw"
