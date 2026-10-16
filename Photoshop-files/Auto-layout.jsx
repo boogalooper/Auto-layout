@@ -15,7 +15,7 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.34 - Geometry + optional semantic ordering
+/** Auto Layout v0.10.35 - Geometry + optional semantic ordering
  *  Geometry works in JSX with optional validated Python multi-zone packing. Local
  *  Python features are enabled only when their runtime is available. Repeated
  *  optional-analysis failures trip a per-run circuit breaker and fall back to
@@ -44,7 +44,7 @@
 
 $.localize = true;
 
-var ver = '0.10.34',
+var ver = '0.10.35',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -3995,6 +3995,10 @@ function evaluateGenderRowsForStats(rows) {
 }
 
 function isBetterGenderPlan(candidate, current) {
+    if (cfg.rowRhythm != 'auto') {
+        var shapeOrder = compareVerticalRowScores(getVerticalRowScore(candidate.distribution, cfg.rowRhythm), getVerticalRowScore(current.distribution, cfg.rowRhythm));
+        if (shapeOrder) return shapeOrder < 0;
+    }
     var a = candidate.genderCheckerboard || getGenderCheckerboardStats(candidate),
         b = current.genderCheckerboard || getGenderCheckerboardStats(current),
         eps = 0.000001;
@@ -4028,6 +4032,10 @@ function arraysEqual(a, b) {
 }
 
 function buildLayoutPlan(items, geometry) {
+    return refineVerticalLayout(buildGeometricLayoutPlan(items, geometry), geometry);
+}
+
+function buildGeometricLayoutPlan(items, geometry) {
     if (lockedLayoutActive()) return buildLockedLayoutPlan(items, geometry);
     var medianHeight = getMedianHeight(items),
         baseGapX = medianHeight * cfg.gapX / 100,
@@ -4064,7 +4072,7 @@ function buildLayoutPlan(items, geometry) {
     for (var rowsCount = minRows; rowsCount <= maxRows; rowsCount++) {
         progress(32 + 23 * (tested / Math.max(1, candidates)), 'Checked ' + tested + '/' + candidates + '; ' + rowsCount + ' rows')
 
-        var distribution = getPreferredRowDistribution(items.length, rowsCount, cfg.rowRhythm),
+        var distribution = getBalancedDistribution(items.length, rowsCount),
             candidate = buildRectangularLayoutCandidate(items, geometry, distribution, baseGapX, baseGapY);
 
         if (!best || isBetterLayout(candidate, best)) best = candidate
@@ -4512,7 +4520,7 @@ function alignRowLeft(interval, rowWidth, count, blockWidth) {
 function copyLayoutMetadata(target, source) {
     copyDefinedPlanMetadata(target, source, [
         'shapedSelection', 'multiZoneSelection', 'zoneCount', 'usedZoneCount',
-        'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics', 'pythonComposition', 'compositionReferenceScale', 'compositionScaleLoss', 'compositionEvaluated', 'compositionColorCost'
+        'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics', 'pythonComposition', 'verticalReferenceScale', 'compositionReferenceScale', 'compositionScaleLoss', 'compositionEvaluated', 'compositionColorCost'
     ]);
 }
 
@@ -4572,6 +4580,7 @@ function getCompositionRowQuality(plan) {
         excess += Math.max(0, hi - lo - 2);
         imbalance += squares - total * total / local.length;
     }
+    if (cfg.rowRhythm != 'auto') return [singles, excess].concat(getVerticalRowScore(counts, cfg.rowRhythm));
     return [singles, excess, imbalance, getRowRhythmPenalty(counts, cfg.rowRhythm)];
 }
 
@@ -4591,7 +4600,7 @@ function optimizeCompositionAssignment(plan, geometry, useGender, useHead, useCo
         reference = plan.compositionReferenceScale;
     if (plan.compositionGeometryBaseline) candidates.push(plan.compositionGeometryBaseline);
     if (plan.compositionJSXBaseline) candidates.push(plan.compositionJSXBaseline);
-    for (var i = 0; i < candidates.length; i++) reference = Math.max(reference, candidates[i].commonScale);
+    for (var i = 0; i < candidates.length; i++) reference = Math.max(reference, candidates[i].commonScale, candidates[i].verticalReferenceScale || 0);
     for (i = 0; i < candidates.length; i++) {
         if (candidates[i].commonScale < reference * (1 - COMPOSITION_MAX_SCALE_LOSS) - 1e-9) continue;
         setLayoutProgressRange(i / candidates.length, 1 / candidates.length);
@@ -4687,7 +4696,7 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
                 // A decomposed shape may fit less tightly than the original JSX
                 // band solver. Always keep the original valid geometry eligible.
                 plan.compositionJSXBaseline = seedPlan;
-                plan.compositionReferenceScale = Math.max(plan.compositionReferenceScale, seedPlan.commonScale);
+                plan.compositionReferenceScale = Math.max(plan.compositionReferenceScale, seedPlan.commonScale, seedPlan.verticalReferenceScale || 0);
             }
         }
         progress(55, 'Python: layout validated.');
@@ -5558,6 +5567,154 @@ function isBetterLayout(candidate, current) {
     return candidate.rows.length < current.rows.length
 }
 
+function compareVerticalRowScores(a, b) {
+    for (var i = 0; i < Math.max(a.length, b.length); i++) {
+        var av = a[i] || 0, bv = b[i] || 0;
+        if (av < bv - 1e-8) return -1;
+        if (av > bv + 1e-8) return 1;
+    }
+    return 0;
+}
+
+function getVerticalRowScore(counts, mode) {
+    var n = counts.length, total = 0, squares = 0, lo = 1e100, hi = 0, singles = 0,
+        violations = 0, severity = 0, mirror = [], tie = 0, i;
+    for (i = 0; i < n; i++) {
+        var value = counts[i]; total += value; squares += value * value;
+        lo = Math.min(lo, value); hi = Math.max(hi, value);
+        if (value == 1 && n > 1) singles++;
+    }
+    for (i = 0; i < Math.floor(n / 2); i++) mirror.push(Math.abs(counts[i] - counts[n - 1 - i]));
+    while (mirror.length < Math.floor(total / 2)) mirror.push(0);
+    var variance = n ? squares - total * total / n : 0, excess = Math.max(0, hi - lo - 2);
+    if (mode == 'auto' || n <= 1) return [singles, excess, variance].concat(mirror);
+    var profile = getRowRhythmProfile(n, mode), middle = (n - 1) / 2;
+    for (i = 1; i < n; i++) {
+        var delta = counts[i] - counts[i - 1], wrong = 0;
+        if (mode == 'alternateWide' || mode == 'alternateNarrow') {
+            var wantsMore = (i % 2 == 0) == (mode == 'alternateWide');
+            wrong = Math.max(0, 1 - (wantsMore ? delta : -delta));
+        } else {
+            var toward = Math.abs(i - middle) < Math.abs(i - 1 - middle),
+                away = Math.abs(i - middle) > Math.abs(i - 1 - middle),
+                wantsIncrease = mode == 'centerWide' ? toward : away;
+            if (toward || away) wrong = Math.max(0, wantsIncrease ? -delta : delta);
+        }
+        if (wrong > 0) { violations++; severity += wrong; }
+    }
+    for (i = 0; i < n; i++) tie -= counts[i] * profile[i];
+    return [excess, singles, violations, severity].concat(mirror, [variance, tie]);
+}
+
+function improveVerticalCounts(counts, mode, feasible, tick) {
+    if (mode == 'auto' || counts.length <= 1) return counts.slice(0);
+    var best = counts.slice(0), score = getVerticalRowScore(best, mode), n = counts.length;
+    for (var pass = 0; pass < Math.min(12, n * 2); pass++) {
+        if (tick) tick();
+        var next = best, nextScore = score;
+        for (var a = 0; a < n; a++) if (best[a] > 1) for (var b = 0; b < n; b++) {
+            if (a == b) continue;
+            var trial = best.slice(0); trial[a]--; trial[b]++;
+            var quality = getVerticalRowScore(trial, mode);
+            if (compareVerticalRowScores(quality, nextScore) < 0 && (!feasible || feasible(trial))) {
+                next = trial; nextScore = quality;
+            }
+        }
+        if (next == best) break;
+        best = next; score = nextScore;
+    }
+    return best;
+}
+
+function reflowVerticalRows(plan, geometry, itemRows, scale) {
+    if (plan.lockedMetrics) return rebuildAssignedLayout(plan, geometry, itemRows, true);
+    if (!priorityOrderValid(itemRows)) return null;
+    var specs = [], groups = [], byZone = {}, r, i;
+    for (r = 0; r < itemRows.length; r++) {
+        var old = plan.rows[r], width = 0, height = 0;
+        for (i = 0; i < itemRows[r].length; i++) {
+            width += itemRows[r][i].width; height = Math.max(height, itemRows[r][i].height);
+        }
+        var spec = { items: itemRows[r], contentWidth: width, rowHeight: height,
+            interval: old.availableInterval, top: old.y, zoneIndex: old.zoneIndex, componentIndex: old.componentIndex };
+        if (!geometry.isRectangle && !geometry.multiZone) {
+            var ranges = getFastRowTopRanges(geometry, height * scale,
+                (width + plan.baseGapX * (itemRows[r].length - 1)) * scale), closest = null, distance = 1e100;
+            for (i = 0; i < ranges.length; i++) {
+                var d = Math.max(ranges[i].topMin - old.y, old.y - ranges[i].topMax, 0);
+                if (d < distance) { distance = d; closest = ranges[i]; }
+            }
+            if (!closest) return null;
+            spec.allowedTopMin = closest.topMin; spec.allowedTopMax = closest.topMax; spec.interval = closest.interval;
+        }
+        specs.push(spec);
+        var key = geometry.multiZone ? String(old.zoneIndex) : 'all';
+        if (!byZone[key]) byZone[key] = [];
+        byZone[key].push(r);
+    }
+    var zones = geometry.multiZone ? flattenComponentZones(geometry.components) : null;
+    for (var key in byZone) if (byZone.hasOwnProperty(key)) {
+        var zone = zones ? zones[Number(key)] : geometry.bounds;
+        groups.push({ type: !geometry.isRectangle && !geometry.multiZone ? 'ranges' : 'container',
+            rowIndices: byZone[key], top: zone.top, bottom: zone.bottom });
+    }
+    var vertical = resolveVerticalLayout(specs, groups, scale, plan.baseGapY);
+    if (!vertical) return null;
+    var metadata = {};
+    copyLayoutMetadata(metadata, plan);
+    copyDefinedPlanMetadata(metadata, plan, ['scaleX', 'scaleY', 'fitDifference']);
+    return finalizeLayoutRows(specs, scale, plan.baseGapX, plan.baseGapY, vertical.gapY, metadata);
+}
+
+function refineVerticalLayout(plan, geometry) {
+    if (!plan || cfg.rowRhythm == 'auto' || plan.pythonPacking || plan.rows.length <= 1) return plan;
+    var initial = plan.distribution, reference = plan.commonScale, fixed = !!plan.lockedMetrics,
+        minimum = fixed ? reference : reference * (1 - (typeof COMPOSITION_MAX_SCALE_LOSS != 'undefined' ? COMPOSITION_MAX_SCALE_LOSS : .01)),
+        seed = {}, rows = plan.rows, groups = {}, i;
+    for (var property in plan) if (plan.hasOwnProperty(property)) seed[property] = plan[property];
+    seed.commonScale = minimum;
+    for (i = 0; i < rows.length; i++) {
+        var key = rows[i].zoneIndex != undefined ? String(rows[i].zoneIndex) : 'all';
+        if (!groups[key]) groups[key] = { indices: [], items: [] };
+        groups[key].indices.push(i); groups[key].items = groups[key].items.concat(rows[i].items);
+    }
+    function rebuild(counts, scale) {
+        var assigned = [], k, r;
+        for (k in groups) if (groups.hasOwnProperty(k)) {
+            var group = groups[k], offset = 0, sum = 0;
+            for (r = 0; r < group.indices.length; r++) sum += counts[group.indices[r]];
+            if (sum != group.items.length) return null;
+            for (r = 0; r < group.indices.length; r++) {
+                var index = group.indices[r]; assigned[index] = group.items.slice(offset, offset + counts[index]); offset += counts[index];
+            }
+        }
+        seed.commonScale = scale;
+        return reflowVerticalRows(seed, geometry, assigned, scale);
+    }
+    var total = 0;
+    for (i = 0; i < initial.length; i++) total += initial[i];
+    var preferred = getPreferredRowDistribution(total, initial.length, cfg.rowRhythm), start = initial;
+    if (compareVerticalRowScores(getVerticalRowScore(preferred, cfg.rowRhythm), getVerticalRowScore(initial, cfg.rowRhythm)) < 0 && rebuild(preferred, minimum)) start = preferred;
+    var bestPlan = null,
+        result = improveVerticalCounts(start, cfg.rowRhythm, function (counts) {
+            var candidate = rebuild(counts, minimum);
+            if (!candidate) return false;
+            bestPlan = candidate; return true;
+        }, function () { progress(currentProgressValue, 'Refining vertical row shape...'); });
+    if (compareVerticalRowScores(getVerticalRowScore(result, cfg.rowRhythm), getVerticalRowScore(initial, cfg.rowRhythm)) >= 0) return plan;
+    bestPlan = rebuild(result, minimum);
+    if (!bestPlan) return plan;
+    var high = reference, low = minimum, exact = rebuild(result, high);
+    if (exact) bestPlan = exact;
+    else if (!fixed) for (i = 0; i < 18; i++) {
+        var scale = (low + high) / 2, candidate = rebuild(result, scale);
+        if (candidate) { bestPlan = candidate; low = scale; } else high = scale;
+    }
+    bestPlan.verticalReferenceScale = reference;
+    validateLayoutPlan(bestPlan, geometry);
+    return bestPlan;
+}
+
 function getPreferredRowDistribution(count, rows, mode) {
     if (mode == 'auto') return getBalancedDistribution(count, rows);
 
@@ -5572,7 +5729,7 @@ function getPreferredRowDistribution(count, rows, mode) {
         output[i] = base;
         ranked.push({ index: i, score: profile[i] });
     }
-    if (!extra) return output;
+    if (!extra) return improveVerticalCounts(output, mode);
 
     ranked.sort(function (a, b) {
         if (Math.abs(a.score - b.score) > 0.000001) return b.score - a.score;
@@ -5582,7 +5739,7 @@ function getPreferredRowDistribution(count, rows, mode) {
     });
 
     for (i = 0; i < extra && i < ranked.length; i++) output[ranked[i].index]++;
-    return output;
+    return improveVerticalCounts(output, mode);
 }
 
 function getRowRhythmProfile(rows, mode) {
