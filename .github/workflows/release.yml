@@ -40,7 +40,7 @@ jobs:
 
           jsx = Path("Photoshop-files/Auto-layout.jsx").read_text(encoding="utf-8-sig")
           server = Path("Photoshop-files/lib/auto-layout-api.pyw").read_text(encoding="utf-8-sig")
-          match = re.search(r"(?m)^var\s+ver\s*=\s*['\"]([0-9]+(?:\.[0-9]+)*)['\"]", jsx)
+          match = re.search(r"(?m)^(?:var|const)\s+ver\s*=\s*['\"]([0-9]+(?:\.[0-9]+)*)['\"]", jsx)
           server_match = re.search(r"(?m)^SERVER_ID\s*=\s*['\"]auto-layout/([^'\"]+)['\"]", server)
           if not match or not server_match:
               raise SystemExit("Cannot read JSX or Python server version")

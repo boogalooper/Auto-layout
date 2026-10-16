@@ -15,36 +15,10 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
-/** Auto Layout v0.10.39 - Geometry + optional semantic ordering
- *  Geometry works in JSX with optional validated Python multi-zone packing. Local
- *  Python features are enabled only when their runtime is available. Repeated
- *  optional-analysis failures trip a per-run circuit breaker and fall back to
- *  the unchanged geometry core.
- *
- *  Current scope:
- *  - orthogonal Photoshop selections, including disconnected areas, holes and open cut-outs;
- *  - connected selected components are identified independently from holes/cut-outs;
- *  - each connected component owns its stable rectangular layout zones;
- *  - pixel, shape and Smart Object layers; groups/linked sets use temporary Smart Object proxies for measurement and remain editable after layout;
- *  - automatic or fixed row count;
- *  - selectable soft vertical row rhythm (auto / wider center / wider edges / alternating);
- *  - optional boy/girl checkerboard ordering using Cyrillic names first and local image fallback;
- *  - optional 3D body/head composition towards the global center, preserving row gender counts;
- *  - one common scale for all selected layers;
- *  - bounds are read from boundsNoEffects;
- *  - hard whole-sheet beginning/end categories selected by layer color labels;
- *  - palette order is the default within each category;
- *  - items inside each row are aligned by their top edge;
- *  - rows support left / center / right / justified horizontal distribution;
- *  - shared horizontal and vertical policies finalize rectangle, shaped and multi-zone layouts;
- *  - horizontal gap rules are shared across zones; one uniform vertical gap policy is used across the whole layout;
- *  - minimum gaps may grow up to a configurable multiplier (horizontal max is ignored in justified mode);
- *  - every row can be placed into its own Photoshop layer group.
- */
 
 $.localize = true;
 
-var ver = '0.10.39',
+const ver = '0.10.39',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -61,41 +35,42 @@ var ver = '0.10.39',
     OPTIONAL_PYTHON_EMPTY_LIMIT = 3;
 
 var s2t = stringIDToTypeID,
+    t2s = typeIDToStringID,
     apl = new AM('application'),
     doc = new AM('document'),
     lr = new AM('layer'),
     pth = new AM('path'),
     str = new Locale(),
     cfg = new Config(),
-    pythonApi = new AutoLayoutApi(API_HOST, API_PORT_SEND, API_PORT_LISTEN, API_FILE),
-    pythonFeatures = new OptionalPythonFeatures(pythonApi, OPTIONAL_PYTHON_FAILURE_LIMIT),
-    headTurnFeatures = new OptionalPythonFeatures(pythonApi, OPTIONAL_PYTHON_FAILURE_LIMIT),
-    colorFeatures = new OptionalPythonFeatures(pythonApi, OPTIONAL_PYTHON_FAILURE_LIMIT),
-    packingDisabledForRun = false,
-    packingFallbackReason = '',
-    semanticImageAnalysisDisabledForRun = false,
-    semanticImageEmptyStreak = 0,
-    semanticImageFallbackReason = '',
-    selectedLayerDescriptorCache = null,
+    py = new AutoLayoutApi(API_HOST, API_PORT_SEND, API_PORT_LISTEN, API_FILE),
+    genderPy = new PythonFeature(py, OPTIONAL_PYTHON_FAILURE_LIMIT),
+    headPy = new PythonFeature(py, OPTIONAL_PYTHON_FAILURE_LIMIT),
+    colorPy = new PythonFeature(py, OPTIONAL_PYTHON_FAILURE_LIMIT),
+    packingDisabled = false,
+    packingError = '',
+    imageAnalysisDisabled = false,
+    imageEmptyStreak = 0,
+    imageAnalysisError = '',
+    selectedDescriptors = null,
     layoutPlan = null,
     sourceState = null,
-    inputPreparation = null,
-    preparedAnalysisItems = null,
-    selectionGeometry = null,
-    genderSummary = null,
-    headTurnSummary = null,
-    pendingPreviews = [],
+    preparation = null,
+    preparedItems = null,
+    selGeometry = null,
+    genderInfo = null,
+    headInfo = null,
+    previews = [],
     previewWork = null,
-    actionPlayback = false,
-    actionLayoutProfile = null,
-    runSucceeded = false,
-    layoutProgressRun = null,
-    layoutProgressWork = null,
-    layoutProgressResult = undefined,
-    currentProgressValue = 0,
+    actionMode = false,
+    actionProfile = null,
+    success = false,
+    progressInfo = null,
+    progressWork = null,
+    progressResult = undefined,
+    progressValue = 0,
     isCancelled = false;
 
-try { runAutoLayoutEntry(); }
+try { init(); }
 catch (entryError) {
     isCancelled = true;
     if (!entryError.number || entryError.number != 8007) alert(entryError.message || entryError, 'Auto Layout');
@@ -110,128 +85,125 @@ function throwCancelled() {
 }
 
 function progress(value, text) {
-    currentProgressValue = Math.round(value);
-    if (typeof layoutProgressRun != 'undefined' && layoutProgressRun && layoutProgressRun.active) {
-        var run = layoutProgressRun, fraction = (value - run.low) / Math.max(1e-9, run.high - run.low);
+    progressValue = Math.round(value);
+    if (progressInfo && progressInfo.active) {
+        var run = progressInfo, fraction = (value - run.low) / Math.max(1e-9, run.high - run.low);
         run.waiting = false;
-        advanceLayoutProgress(run.low == 0 && run.high == 1 ? run.done : run.base + run.length * Math.max(0, Math.min(1, fraction)), text);
+        setProgress(run.low == 0 && run.high == 1 ? run.done : run.base + run.length * Math.max(0, Math.min(1, fraction)), text);
     } else {
         if (text) app.changeProgressText(text);
-        if (app.updateProgress(currentProgressValue, 100) === false) throwCancelled();
+        if (app.updateProgress(progressValue, 100) === false) throwCancelled();
     }
 }
 
 function main() {
-    runSucceeded = false;
-    packingDisabledForRun = false;
-    packingFallbackReason = '';
-    semanticImageAnalysisDisabledForRun = false;
-    semanticImageEmptyStreak = 0;
-    semanticImageFallbackReason = '';
-    selectedLayerDescriptorCache = null;
+    success = false;
+    packingDisabled = false;
+    packingError = '';
+    imageAnalysisDisabled = false;
+    imageEmptyStreak = 0;
+    imageAnalysisError = '';
+    selectedDescriptors = null;
     var historyState;
-    inputPreparation = null; preparedAnalysisItems = null; sourceState = null;
+    preparation = null; preparedItems = null; sourceState = null;
     try {
         if (!apl.getProperty('numberOfDocuments')) throw new Error(str.t('Нет активного документа.', 'No active document.'))
 
         isCancelled = false;
         historyState = activeDocument.activeHistoryState;
-        validatePrioritySettings();
-        sourceState = collectDocumentState();
-        inputPreparation = buildInputPreparation(sourceState.layerIds);
+        validatePriorities();
+        sourceState = getDocumentState();
+        preparation = buildInputPreparation(sourceState.layerIds);
         var alphabetical = alphabetOrderActive(),
             semanticRequested = !alphabetical && !!(cfg.alternateGender || cfg.considerHeadTurn || (cfg.colorMode && cfg.colorMode != 'off')),
             items, originalItems, analysis = null, useGender = false, useHead = false;
-        layoutProgressRun = { index: 0, total: 7 + (inputPreparation ? 2 : 0) + (cfg.groupRows ? 1 : 0) + (semanticRequested ? 2 : 0) + (alphabetical ? 1 : 0), active: false };
-        runLayoutProgressStage('Preparation and selection', function () {
+        progressInfo = { index: 0, total: 7 + (preparation ? 2 : 0) + (cfg.groupRows ? 1 : 0) + (semanticRequested ? 2 : 0) + (alphabetical ? 1 : 0), active: false };
+        progressStage('Preparation and selection', function () {
             historyState = activeDocument.activeHistoryState;
-            layoutUnitProgress(1, 2, 'Selected layers read');
-            selectionGeometry = collectSelectionGeometryWithHistory();
-            layoutUnitProgress(2, 2, 'Selection geometry read');
+            unitProgress(1, 2, 'Selected layers read');
+            selGeometry = getSelectionGeometry();
+            unitProgress(2, 2, 'Selection geometry read');
         });
-        if (inputPreparation) runLayoutProgressStage('Preparing objects for analysis', function () {
+        if (preparation) progressStage('Preparing objects for analysis', function () {
             activeDocument.suspendHistory('Auto layout prepare', 'prepareLayoutSources();');
-            // Flush Photoshop's suspended-history cache before preview anchors.
             if (typeof app.refresh == 'function') app.refresh();
         });
-        items = runLayoutProgressStage('Reading layer sizes', function () {
+        items = progressStage('Reading layer sizes', function () {
             return collectLayoutItems(sourceState.layerIds);
         }, 8, 30);
-        originalItems = items; // Keep proxy-to-root correspondence before any sorting.
+        originalItems = items;
         items = assignLabelPriorities(items);
-        if (alphabetical) runLayoutProgressStage('Reading alphabetical names', function () {
+        if (alphabetical) progressStage('Reading alphabetical names', function () {
             prepareAlphabeticalKeys(items);
             if (cfg.alphabetOrder == 'page') items = sortAlphabeticalItems(items);
         });
-        genderSummary = null; headTurnSummary = null;
-        if (semanticRequested) runLayoutProgressStage('Analyzing photos', function () {
+        genderInfo = null; headInfo = null;
+        if (semanticRequested) progressStage('Analyzing photos', function () {
             analysis = analyzeSemantics(items);
-            genderSummary = analysis.gender; headTurnSummary = analysis.headTurn;
+            genderInfo = analysis.gender; headInfo = analysis.headTurn;
             if (analysis.previewHistoryTouched) {
-                refreshLayoutLayerReferences(items);
+                refreshLayerRefs(items);
                 restoreLayerSelection(sourceState.layerIds, sourceState.activeLayerId);
             }
-            useGender = !!(genderSummary && !genderSummary.fallbackToGeometry);
-            useHead = !!(headTurnSummary && !headTurnSummary.fallbackToGeometry);
+            useGender = !!(genderInfo && !genderInfo.fallbackToGeometry);
+            useHead = !!(headInfo && !headInfo.fallbackToGeometry);
         }, 30, 32);
-        layoutPlan = runLayoutProgressStage('Calculating selection packing', function () {
-            if (cfg.noEnlarge && cfg.pythonPacking && !lockedLayoutActive() && !alphabetOrderActive()) {
-                var median = getMedianHeight(items), cappedPlan = tryPythonZoneLayout(items, selectionGeometry,
+        layoutPlan = progressStage('Calculating selection packing', function () {
+            if (cfg.noEnlarge && cfg.pythonPacking && !fixedLayoutActive() && !alphabetOrderActive()) {
+                var median = getMedianHeight(items), cappedPlan = tryPythonZoneLayout(items, selGeometry,
                     median * cfg.gapX / 100, median * cfg.gapY / 100);
                 if (cappedPlan) return cappedPlan;
             }
-            var seed = useGender ? buildGenderAwareLayoutPlan(items, selectionGeometry) : buildLayoutPlan(items, selectionGeometry);
-            if (cfg.pythonPacking && !alphabetical && !lockedLayoutActive() && !seed.pythonPacking) {
-                var expanded = tryPythonZoneLayout(items, selectionGeometry, seed.baseGapX, seed.baseGapY, seed);
+            var seed = useGender ? buildGenderLayout(items, selGeometry) : buildLayoutPlan(items, selGeometry);
+            if (cfg.pythonPacking && !alphabetical && !fixedLayoutActive() && !seed.pythonPacking) {
+                var expanded = tryPythonZoneLayout(items, selGeometry, seed.baseGapX, seed.baseGapY, seed);
                 if (expanded) return expanded;
             }
             return seed;
         }, 32, 55);
         if (alphabetical && cfg.alphabetOrder == 'zone')
-            layoutPlan = sortAlphabeticalZones(layoutPlan, selectionGeometry);
-        layoutPlan.genderSummary = genderSummary;
-        if (semanticRequested) runLayoutProgressStage('Semantic ordering', function () {
+            layoutPlan = sortAlphabeticalZones(layoutPlan, selGeometry);
+        layoutPlan.genderSummary = genderInfo;
+        if (semanticRequested) progressStage('Semantic ordering', function () {
             var useColor = !!(analysis.color && !analysis.color.fallbackToGeometry),
                 joint = !!layoutPlan.pythonComposition,
                 phases = (useGender || useHead || joint ? 1 : 0) + (useColor && !joint ? 1 : 0), phase = 0;
             if (useGender || useHead || joint) {
-                setLayoutProgressRange(phase++ / phases, 1 / phases);
-                layoutPlan = optimizeCompositionAssignment(layoutPlan, selectionGeometry, useGender, useHead, useColor);
-                layoutUnitProgress(1, 1, 'Gender and pose ordering complete');
+                setProgressRange(phase++ / phases, 1 / phases);
+                layoutPlan = optimizeComposition(layoutPlan, selGeometry, useGender, useHead, useColor);
+                unitProgress(1, 1, 'Gender and pose ordering complete');
             }
-            layoutPlan.headTurnSummary = headTurnSummary;
+            layoutPlan.headTurnSummary = headInfo;
             if (useColor && !joint) {
-                setLayoutProgressRange(phase++ / phases, 1 / phases);
-                layoutPlan = optimizeColorAssignment(layoutPlan, selectionGeometry, useGender, useHead, cfg.colorMode);
-                layoutUnitProgress(1, 1, 'Color ordering complete');
+                setProgressRange(phase++ / phases, 1 / phases);
+                layoutPlan = optimizeColorAssignment(layoutPlan, selGeometry, useGender, useHead, cfg.colorMode);
+                unitProgress(1, 1, 'Color ordering complete');
             }
             layoutPlan.colorSummary = analysis.color;
         });
-        // Capture fixed metrics only after final semantic/alphabetical ordering.
-        if (cfg.lockForAction && !lockedLayoutActive()) {
-            actionLayoutProfile = profileFromLayout(layoutPlan);
-            layoutPlan = freezeLayoutMetrics(layoutPlan, selectionGeometry);
+        if (cfg.lockForAction && !fixedLayoutActive()) {
+            actionProfile = getLayoutProfile(layoutPlan);
+            layoutPlan = lockLayoutMetrics(layoutPlan, selGeometry);
         }
-        runLayoutProgressStage('Validating layout', function () {
-            validateLayoutPlan(layoutPlan, selectionGeometry);
-            layoutUnitProgress(1, 2, 'Bounds and overlaps checked');
-            validateSourceLayersBeforeApply();
-            layoutUnitProgress(2, 2, 'Source layers checked');
+        progressStage('Validating layout', function () {
+            validateLayoutPlan(layoutPlan, selGeometry);
+            unitProgress(1, 2, 'Bounds and overlaps checked');
+            validateSources();
+            unitProgress(2, 2, 'Source layers checked');
         });
-        // All modifying stages retain the single original History/rollback boundary.
-        if (inputPreparation) {
-            preparedAnalysisItems = originalItems;
+        if (preparation) {
+            preparedItems = originalItems;
             activeDocument.activeHistoryState = historyState;
             activeDocument.suspendHistory('Auto layout', 'commitPreparedLayout();');
         } else activeDocument.suspendHistory('Auto layout', 'applyLayoutPlan()');
-        runLayoutProgressStage('Restoring layer selection', function () {
+        progressStage('Restoring layer selection', function () {
             restoreLayerSelection(sourceState.layerIds, sourceState.activeLayerId);
         });
-        if (shouldCollapseAllGroupsAfterLayout()) collapseAllLayerGroups();
-        layoutProgressRun.active = false;
+        if (shouldCollapseGroups()) collapseAllLayerGroups();
+        progressInfo.active = false;
         app.changeProgressText('Done');
         if (app.updateProgress(100, 100) === false) throwCancelled();
-        runSucceeded = true;
+        success = true;
     } catch (e) {
         if (historyState) {
             try { activeDocument.activeHistoryState = historyState } catch (restoreError) {
@@ -251,33 +223,33 @@ function main() {
             alert(e.message ? e.message : e, 'Auto layout')
         }
     } finally {
-        if (layoutProgressRun) layoutProgressRun.active = false;
+        if (progressInfo) progressInfo.active = false;
         cleanupPreviews();
     }
-    if (runSucceeded && analysis && analysis.failureMessage)
+    if (success && analysis && analysis.failureMessage)
         alert(str.t('Раскладка выполнена, но часть выбранного анализа не выполнена:\n', 'Layout completed, but some selected analysis could not be completed:\n') + analysis.failureMessage, 'Auto layout');
 }
 
-function hasLayoutActionParameters(d) {
-    try { return !!(d && d.count > 1 && d.hasKey(app.stringIDToTypeID('inAction')) && d.getBoolean(app.stringIDToTypeID('inAction'))); }
+function hasActionSettings(d) {
+    try { return !!(d && d.count > 1 && d.hasKey(s2t('inAction')) && d.getBoolean(s2t('inAction'))); }
     catch (e) { return false; }
 }
 
-function readLockedActionProfile(d) {
+function getActionProfile(d) {
     try {
-        if (!d.hasKey(app.stringIDToTypeID('lockedReady')) || !d.getBoolean(app.stringIDToTypeID('lockedReady'))) return null;
+        if (!d.hasKey(s2t('lockedReady')) || !d.getBoolean(s2t('lockedReady'))) return null;
         var result = {
-            scale: Number(d.getDouble(app.stringIDToTypeID('lockedScale'))),
-            gapY: Number(d.getDouble(app.stringIDToTypeID('lockedGapY'))),
-            gapX: Number(d.getDouble(app.stringIDToTypeID('lockedGapX'))),
-            height: Number(d.getDouble(app.stringIDToTypeID('lockedHeight')))
+            scale: Number(d.getDouble(s2t('lockedScale'))),
+            gapY: Number(d.getDouble(s2t('lockedGapY'))),
+            gapX: Number(d.getDouble(s2t('lockedGapX'))),
+            height: Number(d.getDouble(s2t('lockedHeight')))
         };
-        validateLockedProfile(result);
+        validateActionProfile(result);
         return result;
     } catch (e) { return null; }
 }
 
-function validateLockedProfile(profile) {
+function validateActionProfile(profile) {
     if (!profile || typeof profile.scale != 'number' || !isFinite(profile.scale) || profile.scale <= 0 ||
         typeof profile.gapY != 'number' || !isFinite(profile.gapY) || profile.gapY < 0 ||
         typeof profile.gapX != 'number' || !isFinite(profile.gapX) || profile.gapX < 0 ||
@@ -285,31 +257,30 @@ function validateLockedProfile(profile) {
         throw new Error(str.t('В экшене нет корректного масштаба и интервалов. Запишите шаг заново на готовой раскладке.', 'The action does not contain valid scale and gap values. Record the step again using a completed layout.'));
 }
 
-function runAutoLayoutEntry() {
-    actionPlayback = hasLayoutActionParameters(app.playbackParameters);
-    cfg.getScriptSettings(actionPlayback);
-    actionLayoutProfile = actionPlayback && cfg.lockForAction ? readLockedActionProfile(app.playbackParameters) : null;
-    var editing = actionPlayback && app.playbackDisplayDialogs == DialogModes.ALL;
-    if (!actionPlayback || editing) {
-        checkAutoLayoutUpdates();
-        var window = dialog(editing), result = window.show();
+function init() {
+    actionMode = hasActionSettings(app.playbackParameters);
+    cfg.getSettings(actionMode);
+    actionProfile = actionMode && cfg.lockForAction ? getActionProfile(app.playbackParameters) : null;
+    var editing = actionMode && app.playbackDisplayDialogs == DialogModes.ALL;
+    if (!actionMode || editing) {
+        checkUpdates();
+        var w = mainDialog(editing), result = w.show();
         if (result !== 1) { isCancelled = true; return; }
         if (editing) {
-            if (cfg.lockForAction) validateLockedProfile(actionLayoutProfile);
-            cfg.putScriptSettings(true);
-            return; // Editing the action updates its descriptor without modifying the document.
+            if (cfg.lockForAction) validateActionProfile(actionProfile);
+            cfg.putSettings(true);
+            return;
         }
-        cfg.putScriptSettings(false);
-        checkAutoLayoutUpdates();
+        cfg.putSettings(false);
+        checkUpdates();
     }
-    if (actionPlayback && cfg.lockForAction) validateLockedProfile(actionLayoutProfile);
+    if (actionMode && cfg.lockForAction) validateActionProfile(actionProfile);
     app.doProgress('Auto Layout', 'main();');
-    if (!runSucceeded) { isCancelled = true; return; }
-    if (!actionPlayback) cfg.putScriptSettings(true); // Recording publishes parameters only after a successful manual run.
+    if (!success) { isCancelled = true; return; }
+    if (!actionMode) cfg.putSettings(true);
 }
 
-// Updates are independent of layout settings and never recorded in Actions.
-function newerAutoLayoutVersion(candidate, current) {
+function isNewerVersion(candidate, current) {
     if (!/^v?\d+(\.\d+)*$/.test(String(candidate)) || !/^v?\d+(\.\d+)*$/.test(String(current))) return false;
     var a = String(candidate).replace(/^v/, '').split('.'), b = String(current).replace(/^v/, '').split('.');
     for (var i = 0; i < Math.max(a.length, b.length); i++) {
@@ -319,36 +290,36 @@ function newerAutoLayoutVersion(candidate, current) {
     return false;
 }
 
-function readAutoLayoutUpdateState() {
+function getUpdateState() {
     var state = { disabled: false, checked: 0, seen: '0' };
     try {
         var d = app.getCustomOptions(UUID + '-updates');
-        state.disabled = d.getBoolean(app.stringIDToTypeID('disabled'));
-        state.checked = d.getDouble(app.stringIDToTypeID('checked'));
-        state.seen = d.getString(app.stringIDToTypeID('seen'));
+        state.disabled = d.getBoolean(s2t('disabled'));
+        state.checked = d.getDouble(s2t('checked'));
+        state.seen = d.getString(s2t('seen'));
     } catch (e) { }
     return state;
 }
 
-function saveAutoLayoutUpdateState(state) {
-    var d = new ActionDescriptor();
-    d.putBoolean(app.stringIDToTypeID('disabled'), !!state.disabled);
-    d.putDouble(app.stringIDToTypeID('checked'), state.checked);
-    d.putString(app.stringIDToTypeID('seen'), String(state.seen));
+function saveUpdateState(state) {
+    var d = new ActionDescriptor;
+    d.putBoolean(s2t('disabled'), !!state.disabled);
+    d.putDouble(s2t('checked'), state.checked);
+    d.putString(s2t('seen'), String(state.seen));
     app.putCustomOptions(UUID + '-updates', d, true);
 }
 
-function writeAutoLayoutUpdateFile(file, text, encoding) {
+function writeUpdateFile(file, text, encoding) {
     file.encoding = encoding || 'UTF-8';
     if (!file.open('w')) throw new Error('Cannot write update file');
     try { if (!file.write(text)) throw new Error('Cannot write update file'); }
     finally { file.close(); }
 }
 
-function launchAutoLayoutUpdateCheck(folder) {
+function launchUpdateCheck(folder) {
     var ps = new File(folder.fsName + '/check.ps1'), launcher = new File(folder.fsName + '/check.vbs'),
         destination = folder.fsName.replace(/'/g, "''") + '/release.json';
-    writeAutoLayoutUpdateFile(ps, '\uFEFF' + [
+    writeUpdateFile(ps, '\uFEFF' + [
         "$ErrorActionPreference = 'Stop'",
         'try {',
         '  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12',
@@ -362,11 +333,11 @@ function launchAutoLayoutUpdateCheck(folder) {
         '} catch { }'
     ].join('\r\n'));
     var command = 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + ps.fsName + '"';
-    writeAutoLayoutUpdateFile(launcher, 'CreateObject("WScript.Shell").Run "' + command.replace(/"/g, '""') + '", 0, False\r\n', 'UTF-16');
+    writeUpdateFile(launcher, 'CreateObject("WScript.Shell").Run "' + command.replace(/"/g, '""') + '", 0, False\r\n', 'UTF-16');
     return launcher.execute();
 }
 
-function showAutoLayoutUpdate(release, state, folder) {
+function showUpdate(release, state, folder) {
     var tag = String(release.tag_name), url = 'https://github.com/boogalooper/Auto-layout/releases/tag/' + tag,
         win = new Window('dialog', str.t('Обновление Auto Layout', 'Auto Layout update'));
     win.orientation = 'column'; win.alignChildren = ['fill', 'top']; win.margins = 16;
@@ -381,18 +352,18 @@ function showAutoLayoutUpdate(release, state, folder) {
     open.onClick = function () { win.close(1); };
     var result = win.show();
     state.seen = tag; state.disabled = !!disabled.value;
-    saveAutoLayoutUpdateState(state);
+    saveUpdateState(state);
     if (result == 1) {
         var shortcut = new File(folder.fsName + '/release.url');
-        writeAutoLayoutUpdateFile(shortcut, '[InternetShortcut]\r\nURL=' + url + '\r\n');
+        writeUpdateFile(shortcut, '[InternetShortcut]\r\nURL=' + url + '\r\n');
         shortcut.execute();
     }
 }
 
-function checkAutoLayoutUpdates() {
+function checkUpdates() {
     try {
-        if (actionPlayback || String($.os).toLowerCase().indexOf('windows') < 0) return;
-        var state = readAutoLayoutUpdateState();
+        if (actionMode || String($.os).toLowerCase().indexOf('windows') < 0) return;
+        var state = getUpdateState();
         if (state.disabled) return;
         var folder = new Folder(Folder.userData.fsName + '/AutoLayoutUpdates');
         if (!folder.exists && !folder.create()) return;
@@ -406,26 +377,23 @@ function checkAutoLayoutUpdates() {
             }
         }
         if (release && release.draft === false && release.prerelease === false &&
-            newerAutoLayoutVersion(release.tag_name, ver) && newerAutoLayoutVersion(release.tag_name, state.seen))
-            showAutoLayoutUpdate(release, state, folder);
+            isNewerVersion(release.tag_name, ver) && isNewerVersion(release.tag_name, state.seen))
+            showUpdate(release, state, folder);
         if (state.disabled) return;
-        var now = (new Date()).getTime();
+        var now = (new Date).getTime();
         if (!isFinite(state.checked) || now < state.checked || now - state.checked >= 86400000) {
             state.checked = now;
-            saveAutoLayoutUpdateState(state);
-            launchAutoLayoutUpdateCheck(folder);
+            saveUpdateState(state);
+            launchUpdateCheck(folder);
         }
-    } catch (updateError) { } // Optional network/UI failures must never affect layout.
+    } catch (updateError) { }
 }
 
-function lockedLayoutActive() {
-    return !!(cfg.lockForAction && typeof actionLayoutProfile != 'undefined' && actionLayoutProfile);
+function fixedLayoutActive() {
+    return !!(cfg.lockForAction && actionProfile);
 }
 
-// Only fixed Actions normalize scale by the median object height.
-// A few protruding captions/decorations do not determine the whole-sheet scale.
-// This measures boundsNoEffects, not an inferred inner photographic frame.
-function resolveLockedScale(items, profile) {
+function getFixedScale(items, profile) {
     var height = getMedianHeight(items), scale = profile.height / height;
     if (!isFinite(height) || height <= 0 || !isFinite(scale) || scale <= 0)
         throw new Error(str.t('Не удалось определить опорную высоту объектов для экшена.',
@@ -435,11 +403,11 @@ function resolveLockedScale(items, profile) {
     return cfg.noEnlarge ? Math.min(1, scale) : scale;
 }
 
-function lockedRuntimeScale() {
-    return actionLayoutProfile.runtimeScale != undefined ? actionLayoutProfile.runtimeScale : actionLayoutProfile.scale;
+function getFixedRuntimeScale() {
+    return actionProfile.runtimeScale != undefined ? actionProfile.runtimeScale : actionProfile.scale;
 }
 
-function profileFromLayout(plan) {
+function getLayoutProfile(plan) {
     var p = {
         scale: plan.commonScale,
         gapY: plan.actualGapY > 0 ? plan.actualGapY : plan.minFinalGapY,
@@ -447,12 +415,11 @@ function profileFromLayout(plan) {
         height: 0
     };
     p.height = getMedianDimension(plan.placements, 'height');
-    validateLockedProfile(p);
+    validateActionProfile(p);
     return p;
 }
 
-function lockedGapPolicy(specs, profile) {
-    // A fixed action uses one global X gap, including Justify.
+function getFixedGaps(specs, profile) {
     var byRow = {}, adjacent = false;
     for (var i = 0; i < specs.length; i++) {
         var count = specs[i].items.length, gap = count > 1 ? profile.gapX : 0;
@@ -468,8 +435,8 @@ function lockedGapPolicy(specs, profile) {
     };
 }
 
-function freezeLayoutMetrics(plan, geometry) {
-    var profile = actionLayoutProfile, specs = [];
+function lockLayoutMetrics(plan, geometry) {
+    var profile = actionProfile, specs = [];
     for (var r = 0; r < plan.rows.length; r++) {
         var row = plan.rows[r];
         specs.push({ items: row.items.slice(0), contentWidth: row.contentWidth, rowHeight: row.rowHeight,
@@ -477,7 +444,7 @@ function freezeLayoutMetrics(plan, geometry) {
     }
     var baseGapX = profile.gapX / profile.scale,
         frozen = finalizeLayoutRows(specs, profile.scale, baseGapX, profile.gapY / profile.scale,
-            plan.actualGapY, plan, lockedGapPolicy(specs, profile));
+            plan.actualGapY, plan, getFixedGaps(specs, profile));
     if (!frozen) throw new Error(str.t('Не удалось зафиксировать интервалы раскладки.', 'Could not lock the layout gaps.'));
     frozen.autoRows = plan.autoRows;
     frozen.lockedMetrics = true;
@@ -485,10 +452,10 @@ function freezeLayoutMetrics(plan, geometry) {
     return frozen;
 }
 
-function buildLockedLayoutPlan(items, geometry) {
-    var profile = actionLayoutProfile;
-    validateLockedProfile(profile);
-    var scale = resolveLockedScale(items, profile),
+function buildFixedLayout(items, geometry) {
+    var profile = actionProfile;
+    validateActionProfile(profile);
+    var scale = getFixedScale(items, profile),
         gx = profile.gapX / scale,
         gy = profile.gapY / scale, zones;
     profile.runtimeScale = scale;
@@ -501,7 +468,7 @@ function buildLockedLayoutPlan(items, geometry) {
         zones = flattenComponentZones(geometry.components);
     }
     var desiredRows = cfg.autoRows ? 0 : Math.max(1, Math.min(cfg.rows, items.length)),
-        allocation = findMultiZoneAllocation(items, zones, scale, gx, gy, buildFastShapeSegmentCache(items),
+        allocation = findMultiZoneAllocation(items, zones, scale, gx, gy, getShapeSegments(items),
             desiredRows, geometry.componentCount || 1);
     if (!allocation) throw new Error(str.t('Фотографии не помещаются при масштабе и интервалах, записанных в экшене. Уменьшите количество фото или запишите новую раскладку.', 'The photos do not fit with the scale and gaps recorded in the action. Reduce the number of photos or record a new layout.'));
     var specs = [], hasLockedVerticalGap = false;
@@ -519,13 +486,13 @@ function buildLockedLayoutPlan(items, geometry) {
         }
         balanceZoneRows(specs, indices, zone, scale, gx, gy,
             getRowRhythmProfile(allocation.rowCount, cfg.rowRhythm).slice(specs.length - indices.length, specs.length));
-        if (!placeContainerVerticalGroup(specs, indices, scale, profile.gapY, zone.top, zone.bottom))
+        if (!placeVerticalGroup(specs, indices, scale, profile.gapY, zone.top, zone.bottom))
             throw new Error(str.t('Ряды не помещаются с зафиксированным интервалом.', 'The rows do not fit with the locked gap.'));
     }
     var plan = finalizeLayoutRows(specs, scale, gx, gy, hasLockedVerticalGap ? profile.gapY : 0, {
         shapedSelection: !geometry.isRectangle, multiZoneSelection: !!geometry.multiZone,
         zoneCount: zones.length, usedZoneCount: allocation.usedZones, usedComponentCount: allocation.usedComponentCount,
-        solverPasses: 1, lockedMetrics: true }, lockedGapPolicy(specs, profile));
+        solverPasses: 1, lockedMetrics: true }, getFixedGaps(specs, profile));
     if (!plan) throw new Error(str.t('Не удалось построить раскладку с параметрами экшена.', 'Could not build a layout using the action parameters.'));
     plan.autoRows = cfg.autoRows;
     validateLayoutPlan(plan, geometry);
@@ -533,27 +500,27 @@ function buildLockedLayoutPlan(items, geometry) {
     return plan;
 }
 
-function runLayoutProgressStage(name, work, low, high) {
-    var run = layoutProgressRun;
+function progressStage(name, work, low, high) {
+    var run = progressInfo;
     run.index++;
     run.name = name; run.done = 0; run.base = 0; run.length = 1;
     run.low = low == undefined ? 0 : low; run.high = high == undefined ? 1 : high;
     run.detail = ''; run.waiting = false; run.active = true;
-    layoutProgressWork = work; layoutProgressResult = undefined;
-    renderLayoutProgress();
-    if (app.doProgressSegmentTask(1, run.index - 1, run.total, 'executeLayoutProgressStage();') === false) throwCancelled();
+    progressWork = work; progressResult = undefined;
+    showProgress();
+    if (app.doProgressSegmentTask(1, run.index - 1, run.total, 'runProgressStage();') === false) throwCancelled();
     run.active = false;
-    return layoutProgressResult;
+    return progressResult;
 }
 
-function executeLayoutProgressStage() {
-    layoutProgressResult = layoutProgressWork();
-    layoutProgressRun.waiting = false;
-    advanceLayoutProgress(1, 'Completed');
+function runProgressStage() {
+    progressResult = progressWork();
+    progressInfo.waiting = false;
+    setProgress(1, 'Completed');
 }
 
-function renderLayoutProgress() {
-    var run = layoutProgressRun;
+function showProgress() {
+    var run = progressInfo;
     if (!run) return;
     var stageNames = { 'Preparation and selection': 'Selection', 'Reading layer sizes': 'Sizes',
         'Analyzing photos': 'Analysis', 'Calculating selection packing': 'Packing',
@@ -569,67 +536,65 @@ function renderLayoutProgress() {
         (detail ? ' — ' + detail : ''));
 }
 
-function autoLayoutProgressPulse() {
-    renderLayoutProgress();
-    if (typeof $ != 'undefined') $.sleep(0);
+function progressPulse() {
+    showProgress();
+    $.sleep(0);
 }
 
-function advanceLayoutProgress(fraction, text) {
-    var run = layoutProgressRun, previous = run.done, next = Math.max(previous, Math.min(1, Math.max(0, fraction))),
+function setProgress(fraction, text) {
+    var run = progressInfo, previous = run.done, next = Math.max(previous, Math.min(1, Math.max(0, fraction))),
         delta = next - previous, portion = delta > 0 ? Math.min(1, delta / Math.max(1e-9, 1 - previous)) : 0;
     run.done = next;
     if (text) run.detail = text;
-    renderLayoutProgress();
-    // Zero slices pump the native UI/cancel channel without inventing progress.
-    // Photoshop taskLength is a fraction of the REMAINING segment, not its original length.
-    if (app.doProgressTask(portion, 'autoLayoutProgressPulse();') === false) throwCancelled();
+    showProgress();
+    if (app.doProgressTask(portion, 'progressPulse();') === false) throwCancelled();
 }
 
-function beginPythonProgressWait(fraction, expectedMs) {
-    if (typeof layoutProgressRun == 'undefined' || !layoutProgressRun || !layoutProgressRun.active) return;
-    var run = layoutProgressRun;
+function beginPythonWait(fraction, expectedMs) {
+    if (!progressInfo || !progressInfo.active) return;
+    var run = progressInfo;
     if (run.waiting && run.waitStarted != undefined) return;
     run.waiting = true;
-    run.waitStarted = (new Date()).getTime(); run.waitBase = run.done;
+    run.waitStarted = (new Date).getTime(); run.waitBase = run.done;
     var quota = fraction == undefined ? (run.name == 'Analyzing photos' ? .05 : 1) : fraction;
     run.waitSpan = Math.min(1 - run.done, run.length * quota);
     run.waitExpected = Math.max(250, expectedMs || 4000);
-    renderLayoutProgress();
+    showProgress();
 }
 
-function endPythonProgressWait() {
-    if (typeof layoutProgressRun == 'undefined' || !layoutProgressRun) return;
-    layoutProgressRun.waiting = false; layoutProgressRun.waitStarted = undefined;
+function endPythonWait() {
+    if (!progressInfo) return;
+    progressInfo.waiting = false; progressInfo.waitStarted = undefined;
 }
 
-function pulseLayoutProgress(waiting) {
-    if (typeof layoutProgressRun != 'undefined' && layoutProgressRun && layoutProgressRun.active) {
-        if (waiting === true) beginPythonProgressWait();
-        if (waiting === false) endPythonProgressWait();
-        var run = layoutProgressRun;
+function pulseProgress(waiting) {
+    if (progressInfo && progressInfo.active) {
+        if (waiting === true) beginPythonWait();
+        if (waiting === false) endPythonWait();
+        var run = progressInfo;
         if (run.waiting && run.waitStarted != undefined) {
-            var elapsed = Math.max(0, (new Date()).getTime() - run.waitStarted),
+            var elapsed = Math.max(0, (new Date).getTime() - run.waitStarted),
                 estimate = run.waitBase + run.waitSpan * .95 * (1 - Math.exp(-elapsed / run.waitExpected));
-            advanceLayoutProgress(estimate);
-        } else advanceLayoutProgress(run.done);
-    } else if (typeof app != 'undefined' && typeof app.updateProgress == 'function' && app.updateProgress(currentProgressValue, 100) === false) throwCancelled();
+            setProgress(estimate);
+        } else setProgress(run.done);
+    } else if (typeof app.updateProgress == 'function' && app.updateProgress(progressValue, 100) === false) throwCancelled();
     return true;
 }
 
-function setLayoutProgressRange(base, length) {
-    if (typeof layoutProgressRun == 'undefined' || !layoutProgressRun || !layoutProgressRun.active) return;
-    layoutProgressRun.base = base; layoutProgressRun.length = length;
+function setProgressRange(base, length) {
+    if (!progressInfo || !progressInfo.active) return;
+    progressInfo.base = base; progressInfo.length = length;
 }
 
-function layoutUnitProgress(done, total, text) {
-    if (typeof layoutProgressRun != 'undefined' && layoutProgressRun && layoutProgressRun.active) {
-        var run = layoutProgressRun;
+function unitProgress(done, total, text) {
+    if (progressInfo && progressInfo.active) {
+        var run = progressInfo;
         run.waiting = false;
-        advanceLayoutProgress(run.base + run.length * Math.max(0, Math.min(1, done / Math.max(1, total))), text);
-    } else progress(currentProgressValue, text);
+        setProgress(run.base + run.length * Math.max(0, Math.min(1, done / Math.max(1, total))), text);
+    } else progress(progressValue, text);
 }
 
-function dialog(editingAction) {
+function mainDialog(editingAction) {
     var dlg = new Window("dialog{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:14}"),
         pnLayout = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
         chAutoRows = pnLayout.add('checkbox'),
@@ -693,7 +658,6 @@ function dialog(editingAction) {
         }
     }, true);
 
-    // Common panel edges and label column; native ScriptUI performs final sizing.
     grRows.alignment = grRhythm.alignment = grAlign.alignment = ['fill', 'center'];
     edRows.alignment = dlRhythm.alignment = dlAlign.alignment = ['fill', 'center'];
     grGapX.alignment = grGapY.alignment = grGapMax.alignment = ['fill', 'top'];
@@ -708,8 +672,8 @@ function dialog(editingAction) {
     pnPriority.text = str.t('Приоритеты по меткам', 'Layer label priorities');
     stPriorityStart.text = str.t('В начале листа', 'At sheet beginning');
     stPriorityEnd.text = str.t('В конце листа', 'At sheet end');
-    populatePriorityDropdown(dlPriorityStart, cfg.priorityStartLabel);
-    populatePriorityDropdown(dlPriorityEnd, cfg.priorityEndLabel);
+    fillPriorityDropdown(dlPriorityStart, cfg.priorityStartLabel);
+    fillPriorityDropdown(dlPriorityEnd, cfg.priorityEndLabel);
     dlPriorityStart.helpTip = dlPriorityEnd.helpTip = str.t('Строгий порядок для всего листа: начало, остальные, конец. Внутри категории действует выбранный способ раскладки.', 'Strict whole-sheet order: beginning, remaining photos, end. The selected layout policy applies within each category.');
 
     dlg.text = 'Auto layout ' + ver
@@ -751,7 +715,7 @@ function dialog(editingAction) {
     ok.text = editingAction ? str.saveAction : str.layoutLayers
     chLockAction.text = str.lockAction
     chLockAction.helpTip = str.lockActionTip;
-    if (editingAction && !cfg.lockForAction && !actionLayoutProfile) {
+    if (editingAction && !cfg.lockForAction && !actionProfile) {
         chLockAction.enabled = false;
         chLockAction.helpTip = str.lockActionRecordFirst;
     }
@@ -765,8 +729,8 @@ function dialog(editingAction) {
     slGapX.value = cfg.gapX
     slGapY.value = cfg.gapY
     slGapMax.value = cfg.maxGapMultiplier
-    var pythonAvailability = pythonApi.getAvailability(),
-        headAvailability = pythonApi.getHeadTurnAvailability(pythonAvailability);
+    var pythonAvailability = py.getAvailability(),
+        headAvailability = py.getHeadTurnAvailability(pythonAvailability);
     var colorModes = getColorModes();
     for (var cm = 0; cm < colorModes.length; cm++) dlColor.add('item', colorModes[cm].label);
     cfg.colorMode = normalizeColorMode(cfg.colorMode);
@@ -795,7 +759,7 @@ function dialog(editingAction) {
         bindCheckbox(checkboxSettings[cb][0], checkboxSettings[cb][1]);
     chLockAction.onClick = function () { cfg.lockForAction = !!this.value; updateAdditionalEnabled(); };
     dlAlphabet.selection = dlAlphabet.items[cfg.alphabetOrder == 'page' ? 1 : cfg.alphabetOrder == 'zone' ? 2 : 0];
-    dlAlphabet.enabled = true; // Always allow disabling a saved mode if Python is unavailable.
+    dlAlphabet.enabled = true;
     dlAlphabet.onChange = function () { readAlphabetSelection(); updateAdditionalEnabled(); };
     updateAdditionalEnabled();
 
@@ -805,7 +769,7 @@ function dialog(editingAction) {
     }
     function updateAdditionalEnabled() {
         var normal = !alphabetOrderActive(),
-            fixed = !!(editingAction && cfg.lockForAction && typeof actionLayoutProfile != 'undefined' && actionLayoutProfile);
+            fixed = !!(editingAction && cfg.lockForAction && actionProfile);
         pnGaps.enabled = slGapX.enabled = slGapY.enabled = slGapMax.enabled = !fixed;
         pnGaps.helpTip = fixed ? str.t('Используются записанные в экшене интервалы X/Y в пикселях. Чтобы задать их заново, перезапишите экшен.', 'Uses the X/Y pixel gaps recorded in the action. Record the action again to set new gaps.') : '';
         chPythonPacking.enabled = normal && !fixed;
@@ -867,9 +831,7 @@ function dialog(editingAction) {
     ok.onClick = function () {
         cfg.priorityStartLabel = priorityDropdownValue(dlPriorityStart);
         cfg.priorityEndLabel = priorityDropdownValue(dlPriorityEnd);
-        try { validatePrioritySettings(); } catch (priorityError) { alert(priorityError.message, 'Auto layout'); return; }
-        // Read every visible control on OK. ScriptUI event delivery must not
-        // determine either the saved settings or the options used for this run.
+        try { validatePriorities(); } catch (priorityError) { alert(priorityError.message, 'Auto layout'); return; }
         for (var cb = 0; cb < checkboxSettings.length; cb++)
             cfg[checkboxSettings[cb][1]] = !!checkboxSettings[cb][0].value;
         cfg.rows = Math.max(1, Math.min(999, Math.round(Number(edRows.text) || 1)));
@@ -879,9 +841,8 @@ function dialog(editingAction) {
         readRhythmSelection();
         readAlignmentSelection();
         readAlphabetSelection();
-        // Read the selected item explicitly, even if ScriptUI skipped onChange.
         if (dlColor.selection) cfg.colorMode = colorModeFromSelection(dlColor.selection);
-        if (editingAction && cfg.lockForAction && !actionLayoutProfile) {
+        if (editingAction && cfg.lockForAction && !actionProfile) {
             alert(str.lockActionRecordFirst, 'Auto layout');
             return;
         }
@@ -899,9 +860,9 @@ function dialog(editingAction) {
     }
 
     function updateGapLabels() {
-        var fixed = !!(editingAction && cfg.lockForAction && typeof actionLayoutProfile != 'undefined' && actionLayoutProfile);
-        stGapXValue.text = fixed ? round2(actionLayoutProfile.gapX) + ' px' : cfg.gapX + '%';
-        stGapYValue.text = fixed ? round2(actionLayoutProfile.gapY) + ' px' : cfg.gapY + '%';
+        var fixed = !!(editingAction && cfg.lockForAction && actionProfile);
+        stGapXValue.text = fixed ? round2(actionProfile.gapX) + ' px' : cfg.gapX + '%';
+        stGapYValue.text = fixed ? round2(actionProfile.gapY) + ' px' : cfg.gapY + '%';
         stGapMaxValue.text = fixed ? '—' : '×' + cfg.maxGapMultiplier;
     }
 
@@ -932,7 +893,6 @@ function getColorModes() {
 
 function normalizeColorMode(value) {
     var token = String(value);
-    // Old profiles/actions migrate to the new neighbourhood objective.
     if (/^(harmonious|lightToDark|darkToLight|vividToMuted|mutedToVivid|1)$/.test(token)) return 'harmonious';
     if (token == 'contrast' || token == '2') return 'contrast';
     return 'off';
@@ -950,7 +910,6 @@ function colorModeFromSelection(selection) {
     for (var i = 0; i < modes.length; i++) if (text == modes[i].label) return modes[i].key;
     return 'off';
 }
-
 
 
 function Locale() {
@@ -1036,7 +995,7 @@ function Config() {
     this.lockForAction = false
     this.groupRows = true
 
-    this.getScriptSettings = function (fromAction) {
+    this.getSettings = function (fromAction) {
         try {
             var d = fromAction ? app.playbackParameters : app.getCustomOptions(UUID);
             descriptorToObject(settingsObj, d)
@@ -1056,21 +1015,21 @@ function Config() {
         this.maxGapMultiplier = Math.max(1, Math.min(4, Math.round(Number(this.maxGapMultiplier) || 1)))
     }
 
-    this.putScriptSettings = function (toAction) {
+    this.putSettings = function (toAction) {
         settingsObj.priorityStartLabel = normalizePriorityLabel(settingsObj.priorityStartLabel);
         settingsObj.priorityEndLabel = normalizePriorityLabel(settingsObj.priorityEndLabel);
         settingsObj.alphabetOrder = normalizeAlphabetOrder(settingsObj.alphabetOrder);
         settingsObj.colorMode = normalizeColorMode(settingsObj.colorMode);
         var d = objectToDescriptor(settingsObj);
         if (toAction) {
-            d.putBoolean(app.stringIDToTypeID('inAction'), true);
+            d.putBoolean(s2t('inAction'), true);
             if (settingsObj.lockForAction) {
-                validateLockedProfile(actionLayoutProfile);
-                d.putBoolean(app.stringIDToTypeID('lockedReady'), true);
-                d.putDouble(app.stringIDToTypeID('lockedScale'), actionLayoutProfile.scale);
-                d.putDouble(app.stringIDToTypeID('lockedGapY'), actionLayoutProfile.gapY);
-                d.putDouble(app.stringIDToTypeID('lockedGapX'), actionLayoutProfile.gapX);
-                d.putDouble(app.stringIDToTypeID('lockedHeight'), actionLayoutProfile.height);
+                validateActionProfile(actionProfile);
+                d.putBoolean(s2t('lockedReady'), true);
+                d.putDouble(s2t('lockedScale'), actionProfile.scale);
+                d.putDouble(s2t('lockedGapY'), actionProfile.gapY);
+                d.putDouble(s2t('lockedGapX'), actionProfile.gapX);
+                d.putDouble(s2t('lockedHeight'), actionProfile.height);
             }
             app.playbackParameters = d;
         } else app.putCustomOptions(UUID, d, true)
@@ -1080,7 +1039,7 @@ function Config() {
         for (var i = 0; i < d.count; i++) {
             var k = d.getKey(i),
                 t = d.getType(k),
-                s = app.typeIDToStringID(k);
+                s = t2s(k);
 
             if (!o.hasOwnProperty(String(s)) || typeof o[s] == 'function') continue;
             switch (t) {
@@ -1099,7 +1058,7 @@ function Config() {
         for (var i = 0; i < properties.length; i++) {
             var key = properties[i],
                 value = o[key],
-                id = app.stringIDToTypeID(key);
+                id = s2t(key);
 
             if (typeof value == 'boolean') d.putBoolean(id, value)
             else if (typeof value == 'number') d.putDouble(id, value)
@@ -1110,14 +1069,14 @@ function Config() {
     }
 }
 
-function readSelectedLayerSnapshot() {
+function getSelectedLayers() {
     var sel = doc.getProperty('targetLayersIDs'), selected = [], output = [], descriptors = {};
     if (!sel || !sel.count) return { ids: output, descriptors: descriptors };
 
     for (var i = 0; i < sel.count; i++) {
         var id = sel.getReference(i).getIdentifier(), d = lr.getDescriptor(id, false), itemIndex = NaN;
         if (d && d.hasKey(s2t('itemIndex'))) itemIndex = d.getInteger(s2t('itemIndex'));
-        else itemIndex = Number(lr.getProperty('itemIndex', id));
+        else itemIndex = Number(lr.getProperty('itemIndex', false, id));
         if (!isFinite(itemIndex)) throw new Error(str.t('Не удалось определить положение выбранного слоя в палитре.', 'Could not determine the selected layer position in the Layers panel.'));
         selected.push({ id: id, itemIndex: itemIndex });
         if (d) descriptors[String(id)] = d;
@@ -1128,13 +1087,11 @@ function readSelectedLayerSnapshot() {
     return { ids: output, descriptors: descriptors };
 }
 
-function collectDocumentState() {
-    var snapshot = readSelectedLayerSnapshot(), ids = snapshot.ids;
+function getDocumentState() {
+    var snapshot = getSelectedLayers(), ids = snapshot.ids;
     if (!ids.length) throw new Error(str.t('Не выбраны слои для раскладки.', 'No layers are selected for layout.'));
 
-    // Keep these exact descriptors for buildInputPreparation/collectLayoutItems.
-    // This removes the former second ActionManager read of every selected layer.
-    selectedLayerDescriptorCache = snapshot.descriptors;
+    selectedDescriptors = snapshot.descriptors;
     var activeId = lr.getProperty('layerID');
     return {
         layerIds: ids.slice(0),
@@ -1150,7 +1107,7 @@ function getSelectedLayerCount() {
     return sel && sel.count ? sel.count : 0;
 }
 
-function selectedLayerSetMatches(ids) {
+function selectionMatches(ids) {
     if (!ids) return false;
     var sel = doc.getProperty('targetLayersIDs');
     if (!sel || sel.count != ids.length) return false;
@@ -1164,14 +1121,12 @@ function selectedLayerSetMatches(ids) {
     return true;
 }
 
-function collectSelectionGeometryWithHistory() {
+function getSelectionGeometry() {
     var originalHistory = activeDocument.activeHistoryState;
     try {
-        app.activeDocument.suspendHistory('Auto layout selection', 'selectionGeometry = collectSelectionGeometry();');
-        return selectionGeometry;
+        app.activeDocument.suspendHistory('Auto layout selection', 'selGeometry = readSelectionGeometry();');
+        return selGeometry;
     } finally {
-        // The temporary Work Path may replace a user's existing Work Path.
-        // Restore the exact selection AND path before analysis and final Apply.
         try { activeDocument.activeHistoryState = originalHistory; }
         catch (restoreError) {
             var error = new Error(str.t('Не удалось восстановить выделение после чтения пути: ', 'Could not restore the selection after reading the path: ') + restoreError.message);
@@ -1181,7 +1136,7 @@ function collectSelectionGeometryWithHistory() {
     }
 }
 
-function collectSelectionGeometry() {
+function readSelectionGeometry() {
     if (!doc.getProperty('selection')) throw new Error(str.t('Сначала создайте выделение из прямоугольных областей.', 'First create a selection made of rectangular areas.'))
 
     var components,
@@ -1194,8 +1149,6 @@ function collectSelectionGeometry() {
         if (!contents || !contents.value) throw new Error(str.t('Не удалось получить геометрию выделения.', 'Could not read the selection geometry.'))
         components = pth.convertToObject(contents.value, 'pathComponents')
     } finally {
-        // Work Path is only a temporary geometry carrier. Pixel selection itself
-        // is never modified, so the exact original selection remains active.
         if (tempPathCreated) pth.deleteWorkPath()
     }
 
@@ -1205,24 +1158,21 @@ function collectSelectionGeometry() {
 
     for (ci = 0; ci < rawContours.length; ci++) {
         var normalized = normalizeContour(rawContours[ci].points, GEOMETRY_EPS);
-        validateOrthogonalContour(normalized, GEOMETRY_EPS)
+        validateContour(normalized, GEOMETRY_EPS)
         contours.push({ points: normalized })
     }
 
-    var bounds = getContoursBounds(contours);
+    var bounds = getSelectionBounds(contours);
     if (bounds.width <= GEOMETRY_EPS || bounds.height <= GEOMETRY_EPS)
         throw new Error(str.t('Размер выделения слишком мал.', 'The selection is too small.'))
 
-    var bands = buildSelectionBandsFromContours(contours, GEOMETRY_EPS),
+    var bands = buildSelectionBands(contours, GEOMETRY_EPS),
         isRectangle = contours.length == 1 && isRectangleContour(contours[0].points, bounds, GEOMETRY_EPS);
 
     if (!bands.length) throw new Error(str.t('Не удалось построить горизонтальные полосы выделения.', 'Could not build horizontal bands for the selection.'))
 
-    // Connectivity is derived from the filled horizontal intervals themselves,
-    // not from Photoshop path direction. This lets us reliably distinguish
-    // separate selected islands from holes and open cut-outs in one island.
-    var selectionComponents = buildConnectedSelectionComponents(bands, GEOMETRY_EPS),
-        topology = analyzeSelectionTopology(selectionComponents, bands, GEOMETRY_EPS),
+    var selectionComponents = buildSelectionComponents(bands, GEOMETRY_EPS),
+        topology = getSelectionTopology(selectionComponents, bands, GEOMETRY_EPS),
         hasMultipleIntervals = false;
 
     for (var bi = 0; bi < bands.length; bi++) {
@@ -1259,7 +1209,7 @@ function collectSelectionGeometry() {
     }
 }
 
-function getContoursBounds(contours) {
+function getSelectionBounds(contours) {
     var left = 1e100,
         top = 1e100,
         right = -1e100,
@@ -1287,7 +1237,7 @@ function getContoursBounds(contours) {
     }
 }
 
-function buildSelectionBandsFromContours(contours, eps) {
+function buildSelectionBands(contours, eps) {
     var ys = [], i, c;
     for (c = 0; c < contours.length; c++) {
         for (i = 0; i < contours[c].points.length; i++)
@@ -1302,7 +1252,7 @@ function buildSelectionBandsFromContours(contours, eps) {
         if (bottom - top <= eps) continue;
 
         var y = top + (bottom - top) / 2,
-            intervals = getContoursIntervalsAtY(contours, y, eps);
+            intervals = getIntervalsAtY(contours, y, eps);
 
         if (!intervals.length) continue;
         bands.push({ top: top, bottom: bottom, intervals: intervals })
@@ -1310,7 +1260,7 @@ function buildSelectionBandsFromContours(contours, eps) {
     return bands
 }
 
-function getContoursIntervalsAtY(contours, y, eps) {
+function getIntervalsAtY(contours, y, eps) {
     var xs = [];
 
     for (var c = 0; c < contours.length; c++) {
@@ -1339,7 +1289,7 @@ function getContoursIntervalsAtY(contours, y, eps) {
     return mergeIntervals(intervals, eps)
 }
 
-function buildConnectedSelectionComponents(bands, eps) {
+function buildSelectionComponents(bands, eps) {
     var nodes = [],
         parent = [],
         rank = [],
@@ -1386,8 +1336,6 @@ function buildConnectedSelectionComponents(bands, eps) {
         }
     }
 
-    // Both interval lists are already sorted and internally disjoint. A two-
-    // pointer sweep connects adjacent bands in O(A+B), instead of O(A*B).
     for (bi = 1; bi < bands.length; bi++) {
         var currentBand = bands[bi],
             previousBand = bands[bi - 1];
@@ -1488,7 +1436,7 @@ function intervalsTouchOrOverlap(a, b, eps) {
     return Math.min(a.right, b.right) >= Math.max(a.left, b.left) - eps
 }
 
-function analyzeSelectionTopology(components, bands, eps) {
+function getSelectionTopology(components, bands, eps) {
     var holes = [],
         openCutouts = [];
 
@@ -1538,7 +1486,7 @@ function analyzeComponentVoids(component, bands, eps) {
         if (bottom - top <= eps) continue;
 
         var probeY = top + (bottom - top) / 2,
-            filled = getComponentIntervalsAtYFromBands(component.componentIndex, bands, probeY,
+            filled = getComponentIntervals(component.componentIndex, bands, probeY,
                 component.left, component.right, eps),
             gaps = complementIntervals(filled, component.left, component.right, eps);
 
@@ -1584,8 +1532,6 @@ function analyzeComponentVoids(component, bands, eps) {
         }
     }
 
-    // Voids can connect only between adjacent horizontal slices. Since each
-    // slice is ordered and disjoint, use the same linear interval sweep.
     for (yi = 1; yi < nodesBySlice.length; yi++) {
         var previous = nodesBySlice[yi - 1] || [],
             current = nodesBySlice[yi] || [],
@@ -1647,12 +1593,12 @@ function analyzeComponentVoids(component, bands, eps) {
         else holes.push(region);
     }
 
-    sortRegionsByReadingOrder(holes, eps);
-    sortRegionsByReadingOrder(openCutouts, eps);
+    sortRegions(holes, eps);
+    sortRegions(openCutouts, eps);
     return { holes: holes, openCutouts: openCutouts };
 }
 
-function getComponentIntervalsAtYFromBands(componentIndex, bands, y, left, right, eps) {
+function getComponentIntervals(componentIndex, bands, y, left, right, eps) {
     var intervals = [];
     for (var i = 0; i < bands.length; i++) {
         var band = bands[i];
@@ -1686,7 +1632,7 @@ function complementIntervals(intervals, left, right, eps) {
     return out
 }
 
-function sortRegionsByReadingOrder(regions, eps) {
+function sortRegions(regions, eps) {
     regions.sort(function (a, b) {
         if (Math.abs(a.top - b.top) > eps) return a.top - b.top
         if (Math.abs(a.left - b.left) > eps) return a.left - b.left
@@ -1847,7 +1793,7 @@ function normalizeContour(points, eps) {
     return out
 }
 
-function validateOrthogonalContour(points, eps) {
+function validateContour(points, eps) {
     if (points.length < 4) throw new Error(str.t('Контур выделения содержит слишком мало точек.', 'The selection contour contains too few points.'))
 
     for (var i = 0; i < points.length; i++) {
@@ -1887,7 +1833,6 @@ function isRectangleContour(points, bounds, eps) {
 }
 
 
-
 function getBandBreaks(bands) {
     var out = [];
     for (var i = 0; i < bands.length; i++) {
@@ -1898,7 +1843,7 @@ function getBandBreaks(bands) {
     return out
 }
 
-function getIntervalsForVerticalSpan(geometry, top, bottom) {
+function getVerticalIntervals(geometry, top, bottom) {
     var eps = FIT_EPS,
         current = null,
         coveredTop = top,
@@ -1970,8 +1915,6 @@ function pushUniqueNumber(a, value, eps) {
 }
 
 
-// One full ActionManager descriptor per layer, using the bottom-up group
-// boundaries from the user's Layers - parse layers pallette to object example.
 function readPreparationLayer(d, index) {
     function has(key) { return d.hasKey(s2t(key)); }
     var section = has('layerSection') ? typeIDToStringID(d.getEnumerationValue(s2t('layerSection'))) : 'layerSectionContent';
@@ -2001,7 +1944,7 @@ function readPreparationLayer(d, index) {
     return node;
 }
 
-function collectPreparationLayers() {
+function getPreparationLayers() {
     var from = doc.getProperty('hasBackgroundLayer') ? 0 : 1, to = doc.getProperty('numberOfLayers'),
         containers = [[]], nodes = [], byId = {};
     for (var i = from; i <= to; i++) {
@@ -2023,10 +1966,8 @@ function collectPreparationLayers() {
 }
 
 function buildInputPreparation(ids) {
-    var needed = false, cache = selectedLayerDescriptorCache || {};
-    // The snapshot belongs to the current unmodified document only. If input
-    // preparation becomes necessary it is discarded before Photoshop changes it.
-    selectedLayerDescriptorCache = null;
+    var needed = false, cache = selectedDescriptors || {};
+    selectedDescriptors = null;
     for (var i = 0; i < ids.length; i++) {
         if (i % 20 == 0) progress(0, 'Selection ' + i + '/' + ids.length);
         var key = String(ids[i]), d = cache[key] || lr.getDescriptor(ids[i], false);
@@ -2035,11 +1976,9 @@ function buildInputPreparation(ids) {
         var node = readPreparationLayer(d, 0);
         if (node.section == 'layerSectionStart' || node.links.length) needed = true;
     }
-    // If no preparation is required, the same descriptors can also supply
-    // bounds/type/name to collectLayoutItems with no additional AM round-trip.
-    selectedLayerDescriptorCache = needed ? null : cache;
+    selectedDescriptors = needed ? null : cache;
     if (!needed) return null;
-    return planInputPreparation(collectPreparationLayers(), ids);
+    return planInputPreparation(getPreparationLayers(), ids);
 }
 
 function planInputPreparation(tree, selectedIds) {
@@ -2073,8 +2012,6 @@ function planInputPreparation(tree, selectedIds) {
             if (members[key]) continue;
             node = byId[key]; members[key] = true; visited[key] = true; all.push(node);
             for (j = 0; j < node.children.length; j++) {
-                // A group contains its children even though their selected owner
-                // is the group itself: inspect their links as well.
                 var descend = [node.children[j]];
                 for (var di = 0; di < descend.length; di++) {
                     var child = descend[di], ck = String(child.id);
@@ -2109,14 +2046,14 @@ function planInputPreparation(tree, selectedIds) {
         for (j = 1; j < roots.length; j++) if ((rank[String(roots[j].kind)] || 0) > (rank[String(fallback.kind)] || 0)) fallback = roots[j];
         var unit = { roots: roots, members: all, convert: convert, name: convert && texts.length ? texts.join(' ') : fallback.name,
             order: roots[0].itemIndex, priority: priorityForRoots(roots) };
-        if (convert) validatePreparationContext(unit, tree);
+        if (convert) validatePreparation(unit, tree);
         units.push(unit);
     }
     units.sort(function (a, b) { return b.order - a.order; });
     return { units: units, tree: tree, originalSelectedIds: selectedIds.slice(0) };
 }
 
-function validatePreparationContext(unit, tree) {
+function validatePreparation(unit, tree) {
     var roots = {}, members = {}, i, j, node, parentId = unit.roots[0].parentId,
         siblings = parentId == null ? tree.roots.slice(0) : tree.byId[String(parentId)].children.slice(0);
     for (i = 0; i < unit.roots.length; i++) roots[String(unit.roots[i].id)] = true;
@@ -2133,8 +2070,6 @@ function validatePreparationContext(unit, tree) {
         node = unit.members[i];
         var blending = node.section != 'layerSectionStart' && node.blendMode && node.blendMode != 'normal';
         if ((node.kind != 2 && !blending) || node.clipped) continue;
-        // An unclipped adjustment only stays local if an enclosing non-pass-
-        // through group is already part of this self-contained object.
         var p = node.parentId == null ? null : tree.byId[String(node.parentId)], isolated = false;
         while (p && members[String(p.id)]) {
             if (p.blendMode && p.blendMode != 'passThrough') { isolated = true; break; }
@@ -2147,9 +2082,9 @@ function validatePreparationContext(unit, tree) {
 
 function prepareLayoutSources() {
     var ids = [], activeId = null;
-    for (var i = 0; i < inputPreparation.units.length; i++) {
-        var unit = inputPreparation.units[i], roots = [];
-        layoutUnitProgress(i, inputPreparation.units.length, 'Objects ' + i + '/' + inputPreparation.units.length);
+    for (var i = 0; i < preparation.units.length; i++) {
+        var unit = preparation.units[i], roots = [];
+        unitProgress(i, preparation.units.length, 'Objects ' + i + '/' + preparation.units.length);
         for (var r = 0; r < unit.roots.length; r++) roots.push(unit.roots[r].id);
         lr.selectLayers(roots);
         if (unit.convert) {
@@ -2158,11 +2093,11 @@ function prepareLayoutSources() {
             lr.setLayerName(unit.name);
         }
         var id = lr.getProperty('layerID');
-        if (!isFinite(Number(id)) || (unit.convert && lr.getProperty('layerKind', id) != 5)) throw new Error(str.t('Не удалось подготовить смарт-объект "', 'Could not prepare Smart Object "') + unit.name + str.t('".', '".'));
+        if (!isFinite(Number(id)) || (unit.convert && lr.getProperty('layerKind', false, id) != 5)) throw new Error(str.t('Не удалось подготовить смарт-объект "', 'Could not prepare Smart Object "') + unit.name + str.t('".', '".'));
         ids.push(id);
         for (r = 0; r < unit.members.length; r++)
             if (unit.members[r].id == sourceState.originalActiveLayerId) activeId = id;
-        layoutUnitProgress(i + 1, inputPreparation.units.length, 'Objects ' + (i + 1) + '/' + inputPreparation.units.length);
+        unitProgress(i + 1, preparation.units.length, 'Objects ' + (i + 1) + '/' + preparation.units.length);
     }
     sourceState.layerIds = ids;
     sourceState.activeLayerId = activeId == null ? ids[0] : activeId;
@@ -2171,29 +2106,26 @@ function prepareLayoutSources() {
 
 function commitPreparedLayout() {
     var preparedMap = null;
-    runLayoutProgressStage('Restoring source objects', function () {
-        preparedMap = buildPreparedOriginalMap();
-        validateOriginalPreparationUnits(preparedMap);
-        // The temporary proxy IDs disappeared when main() restored the original
-        // History state. From this point the public selection state refers only
-        // to the user's original layers/groups again.
+    progressStage('Restoring source objects', function () {
+        preparedMap = getOriginalMap();
+        validateOriginalUnits(preparedMap);
         sourceState.layerIds = sourceState.originalLayerIds.slice(0);
         sourceState.activeLayerId = sourceState.originalActiveLayerId;
-        layoutUnitProgress(1, 1, 'Source groups and links restored');
+        unitProgress(1, 1, 'Source groups and links restored');
     });
     applyPreparedLayoutPlan(preparedMap);
 }
 
-function buildPreparedOriginalMap() {
-    if (!inputPreparation || !preparedAnalysisItems || inputPreparation.units.length != preparedAnalysisItems.length)
+function getOriginalMap() {
+    if (!preparation || !preparedItems || preparation.units.length != preparedItems.length)
         throw new Error(str.t('Потеряно соответствие временных объектов исходным группам.', 'The mapping between temporary objects and source groups was lost.'));
 
     var byProxyId = {}, placementByProxyId = {}, i;
     for (i = 0; i < layoutPlan.placements.length; i++)
         placementByProxyId[String(layoutPlan.placements[i].layerId)] = layoutPlan.placements[i];
 
-    for (i = 0; i < inputPreparation.units.length; i++) {
-        var unit = inputPreparation.units[i], proxy = preparedAnalysisItems[i], roots = [], r;
+    for (i = 0; i < preparation.units.length; i++) {
+        var unit = preparation.units[i], proxy = preparedItems[i], roots = [], r;
         if (!proxy || placementByProxyId[String(proxy.id)] == undefined)
             throw new Error(str.t('Потеряно соответствие позиции объекту "', 'The position mapping was lost for object "') + (unit.name || '') + str.t('".', '".'));
         for (r = 0; r < unit.roots.length; r++) roots.push(unit.roots[r].id);
@@ -2207,7 +2139,7 @@ function buildPreparedOriginalMap() {
     return byProxyId;
 }
 
-function validateOriginalPreparationUnits(preparedMap) {
+function validateOriginalUnits(preparedMap) {
     var usedRoots = {}, mapped = 0, proxyKey, r;
     for (proxyKey in preparedMap) if (preparedMap.hasOwnProperty(proxyKey)) {
         mapped++;
@@ -2223,14 +2155,14 @@ function validateOriginalPreparationUnits(preparedMap) {
             usedRoots[key] = true;
         }
     }
-    if (mapped != inputPreparation.units.length || mapped != layoutPlan.placements.length)
+    if (mapped != preparation.units.length || mapped != layoutPlan.placements.length)
         throw new Error(str.t('Количество исходных объектов не совпадает с рассчитанной раскладкой.', 'The number of source objects does not match the calculated layout.'));
 }
 
-function getPreparedUnitTransformBounds(rootIds) {
+function getUnitTransformBounds(rootIds) {
     var result = null;
     for (var i = 0; i < rootIds.length; i++) {
-        var property = lr.getProperty('boundsNoEffects', rootIds[i]);
+        var property = lr.getProperty('boundsNoEffects', false, rootIds[i]);
         if (!property || !property.value) throw new Error(str.t('Не удалось получить границы исходной группы/слоя.', 'Could not get the bounds of the source group/layer.'));
         var b = lr.descToObject(property.value), left = Number(b.left), top = Number(b.top), right = Number(b.right), bottom = Number(b.bottom);
         if (!isFinite(left) || !isFinite(top) || !isFinite(right) || !isFinite(bottom) || right <= left || bottom <= top)
@@ -2253,15 +2185,12 @@ function applyPreparedLayoutPlan(preparedMap) {
     var scale = layoutPlan.commonScale, total = layoutPlan.placements.length, i;
     if (!isFinite(scale) || scale <= 0) throw new Error(str.t('Некорректный общий масштаб.', 'Invalid common scale.'));
 
-    // Derive one affine transform per original layout-unit. The temporary proxy
-    // defines the visual bbox, while QCSAverage uses the native root-set bbox as
-    // the transform centre. The offset below compensates that difference exactly.
-    runLayoutProgressStage('Calculating object transforms', function () {
+    progressStage('Calculating object transforms', function () {
         for (i = 0; i < total; i++) {
             var p = layoutPlan.placements[i], entry = preparedMap[String(p.layerId)];
             if (!entry) throw new Error(str.t('Не найден исходный объект для "', 'Source object not found for "') + p.name + str.t('".', '".'));
-            layoutUnitProgress(i, total, i + '/' + total);
-            var transformBounds = getPreparedUnitTransformBounds(entry.roots),
+            unitProgress(i, total, i + '/' + total);
+            var transformBounds = getUnitTransformBounds(entry.roots),
                 cx = transformBounds.centerX, cy = transformBounds.centerY,
                 scaledProxyLeft = cx + (entry.proxy.left - cx) * scale,
                 scaledProxyTop = cy + (entry.proxy.top - cy) * scale;
@@ -2275,14 +2204,14 @@ function applyPreparedLayoutPlan(preparedMap) {
             };
             if (!isFinite(entry.transformOffsetX) || !isFinite(entry.transformOffsetY))
                 throw new Error(str.t('Не удалось рассчитать трансформацию исходного объекта "', 'Could not calculate the transform for source object "') + p.name + str.t('".', '".'));
-            layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
+            unitProgress(i + 1, total, (i + 1) + '/' + total);
         }
     });
 
-    runLayoutProgressStage('Transforming source objects', function () {
+    progressStage('Transforming source objects', function () {
         for (i = 0; i < total; i++) {
             var p = layoutPlan.placements[i], entry = preparedMap[String(p.layerId)];
-            layoutUnitProgress(i, total, i + '/' + total);
+            unitProgress(i, total, i + '/' + total);
             lr.selectLayers(entry.roots);
             if (cfg.noEnlarge && scale > 1 + 1e-12) throw new Error(str.t('Увеличение слоёв запрещено.', 'Layer enlargement is disabled.'));
             if (cfg.noEnlarge && Math.abs(scale - 1) <= 1e-12) {
@@ -2291,15 +2220,15 @@ function applyPreparedLayoutPlan(preparedMap) {
             } else if (Math.abs(scale - 1) > 0.0000001 || Math.abs(entry.transformOffsetX) > 0.0001 || Math.abs(entry.transformOffsetY) > 0.0001)
                 lr.transformSelection(scale * 100, entry.transformOffsetX, entry.transformOffsetY);
             if (layoutPlan.lockedMetrics)
-                validateAppliedBounds(entry.expectedBounds, getPreparedUnitTransformBounds(entry.roots), p.name);
-            layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
+                validateAppliedBounds(entry.expectedBounds, getUnitTransformBounds(entry.roots), p.name);
+            unitProgress(i + 1, total, (i + 1) + '/' + total);
         }
     });
 
-    if (cfg.groupRows) runLayoutProgressStage('Grouping rows', function () { groupLayoutRows(layoutPlan.rows, preparedMap); });
+    if (cfg.groupRows) progressStage('Grouping rows', function () { groupLayoutRows(layoutPlan.rows, preparedMap); });
 }
 
-function readLayoutLayerDescriptor(d, fallbackId, order) {
+function readLayoutLayer(d, fallbackId, order) {
     function has(key) { return d.hasKey(s2t(key)); }
     function numberFrom(desc, key) {
         if (!desc || !desc.hasKey(s2t(key))) return NaN;
@@ -2351,17 +2280,15 @@ function readLayoutLayerDescriptor(d, fallbackId, order) {
 }
 
 function collectLayoutItems(ids) {
-    var output = [], count = ids.length, cache = selectedLayerDescriptorCache;
-    // The cached descriptors are snapshots and are valid only before any input
-    // preparation. Consume the cache once so it cannot leak into later stages.
-    selectedLayerDescriptorCache = null;
+    var output = [], count = ids.length, cache = selectedDescriptors;
+    selectedDescriptors = null;
 
     for (var i = 0; i < count; i++) {
         var id = ids[i];
         progress(8 + 22 * (i / Math.max(1, count)), 'Layers ' + i + '/' + count);
         var d = cache && cache[String(id)] ? cache[String(id)] : lr.getDescriptor(id, false);
-        var item = readLayoutLayerDescriptor(d, id, i);
-        if (typeof inputPreparation != 'undefined' && inputPreparation) item.priority = inputPreparation.units[i].priority;
+        var item = readLayoutLayer(d, id, i);
+        if (preparation) item.priority = preparation.units[i].priority;
         output.push(item);
         progress(8 + 22 * ((i + 1) / Math.max(1, count)), 'Layers ' + (i + 1) + '/' + count);
     }
@@ -2370,7 +2297,6 @@ function collectLayoutItems(ids) {
 
 
 function getPriorityLabels() {
-    // Dropdown swatches from Batch for layers; all behaviour belongs to Auto Layout.
     return [
         { value: 'off', label: str.t('Не задано', 'Not set'), icon: null },
         { value: 'none', label: str.t('Без цветовой метки', 'No color label'), icon: "\u0089PNG\r\n\x1A\n\x00\x00\x00\rIHDR\x00\x00\x00\n\x00\x00\x00\n\b\x06\x00\x00\x00\u008D2\u00CF\u00BD\x00\x00\x00\u00CEIDAT\x18\u0095\u008D\u0090A\x0BE@\x14\u0085\u00CFLS\u00A2,D6~\u0083R\u00CAF\u00E4WS\u0094\u0094\u00C8N\u00F9\x19R\u00D6\x12^s\u00DF3\u00CF\u00EA\u00F5NM3\u00E7\u00CE\u0099\u00B9_\u0097\x15Eq\u00E1\x0F\t\x19\t\u0082\x00\u00D7uA\bA\u00FBS\u00D2\u008F\u00E3\b\u008E\u008F\x19\u0086\x01\u0086a\u00C0u]Z\u009A\u00A6\u00A1\u00EB:\u00F5\u0090\u0082\u009CsDQ\u0084\u00B2,\u00B1m\x1B\u00D6uE]\u00D7H\u0092\x04\u008C1\nRk)\u00CF\u00F3\u00E0\u00FB>\u00F2<'\x1F\u00C71\x1C\u00C7\u00C1<\u00CF\u00DF\x1Fo\u0099\u00A6\u00A9\u00CE\x12\u00E3)\u00C5\u00B8,\x0B\u00FA\u00BEG\u009A\u00A6\b\u00C3\x10UU\x11\u00C2-j-9\u00DA\u00B6E\u0096e\u00B0,\x0B\u00B6mC\u00D7u4MC\b\u00F2\u009E\u0082\u00C7qPa\u00DFw\u00C5ts\u009E\u00E7\u00F9\x1E\u009D,L\u00D3\u00F4{\u00E2\x00^\u00D6\u0089Tf\u00E31\u0087\u00CC\x00\x00\x00\x00IEND\u00AEB`\u0082" },
@@ -2394,7 +2320,7 @@ function normalizePriorityLabel(value) {
     return 'off';
 }
 
-function populatePriorityDropdown(control, value) {
+function fillPriorityDropdown(control, value) {
     var labels = getPriorityLabels(), selected = normalizePriorityLabel(value);
     for (var i = 0; i < labels.length; i++) {
         var item = control.add('item', labels[i].label);
@@ -2408,7 +2334,7 @@ function priorityDropdownValue(control) {
     return normalizePriorityLabel(control.selection ? control.selection.priorityLabel : 'off');
 }
 
-function validatePrioritySettings() {
+function validatePriorities() {
     var first = normalizePriorityLabel(cfg.priorityStartLabel), last = normalizePriorityLabel(cfg.priorityEndLabel);
     if (first != 'off' && first == last)
         throw new Error(str.t('Выберите разные метки для начала и конца листа.', 'Choose different labels for the beginning and end of the sheet.'));
@@ -2420,7 +2346,6 @@ function readLayerColorLabel(descriptor) {
 }
 
 function priorityForLabel(label) {
-    // Unknown future Photoshop labels remain ordinary, never become "unlabeled".
     var first = normalizePriorityLabel(cfg.priorityStartLabel), last = normalizePriorityLabel(cfg.priorityEndLabel);
     if (first != 'off' && String(label || 'none') == first) return 0;
     if (last != 'off' && String(label || 'none') == last) return 2;
@@ -2470,14 +2395,14 @@ function normalizeAlphabetOrder(value) {
 function alphabetOrderActive() { return normalizeAlphabetOrder(cfg.alphabetOrder) != 'off'; }
 
 function prepareAlphabeticalKeys(items) {
-    pythonFeatures.resetForRun();
-    if (!pythonFeatures.ensureReady()) throw new Error(str.t('Для сортировки имён нужен Python: ', 'Python is required for name ordering: ') + pythonFeatures.getState().message);
+    genderPy.resetForRun();
+    if (!genderPy.ensureReady()) throw new Error(str.t('Для сортировки имён нужен Python: ', 'Python is required for name ordering: ') + genderPy.getState().message);
     var payload = [], expected = {}, i;
     for (i = 0; i < items.length; i++) { payload.push({ id: items[i].id, name: items[i].name }); expected[String(items[i].id)] = items[i]; }
-    beginPythonProgressWait(1, 1500);
+    beginPythonWait(1, 1500);
     var call;
-    try { call = pythonFeatures.call('alphabet_names', payload, { photo: false }); }
-    finally { endPythonProgressWait(); }
+    try { call = genderPy.call('alphabet_names', payload, { photo: false }); }
+    finally { endPythonWait(); }
     if (!call.ok || !(call.value instanceof Array) || call.value.length != items.length)
         throw new Error(str.t('Не удалось разобрать имена для алфавитной сортировки.', 'Could not parse names for alphabetical ordering.'));
     var seen = {};
@@ -2487,7 +2412,7 @@ function prepareAlphabeticalKeys(items) {
             throw new Error(str.t('Некорректный ответ сортировки имён.', 'Invalid name-ordering response.'));
         seen[key] = true; item.alphabetKey = row.key; item.alphabetNamed = row.named;
     }
-    layoutUnitProgress(1, 1, 'Names parsed');
+    unitProgress(1, 1, 'Names parsed');
 }
 
 function sortAlphabeticalItems(items) {
@@ -2497,7 +2422,7 @@ function sortAlphabeticalItems(items) {
         if (a.alphabetNamed != b.alphabetNamed) return a.alphabetNamed ? -1 : 1;
         if (a.alphabetKey < b.alphabetKey) return -1;
         if (a.alphabetKey > b.alphabetKey) return 1;
-        return a.order - b.order; // Stable ties, independent of engine sort stability.
+        return a.order - b.order;
     });
 }
 
@@ -2516,8 +2441,6 @@ function sortAlphabeticalZones(plan, geometry) {
     }
     var candidate = rebuildAssignedLayout(plan, geometry, rows, true);
     if (!candidate && !plan.lockedMetrics) {
-        // Different widths can require a slightly smaller common scale. Keep zone
-        // membership and row counts instead of silently breaking alphabetical order.
         var low = 0, high = plan.commonScale, seed = {}, k;
         for (k in plan) if (plan.hasOwnProperty(k)) seed[k] = plan[k];
         for (i = 0; i < 28; i++) {
@@ -2532,14 +2455,14 @@ function sortAlphabeticalZones(plan, geometry) {
 }
 
 function analyzeSemantics(items) {
-    pythonFeatures.resetForRun();
-    semanticImageAnalysisDisabledForRun = false;
-    semanticImageEmptyStreak = 0;
-    semanticImageFallbackReason = '';
-    headTurnFeatures.resetForRun();
+    genderPy.resetForRun();
+    imageAnalysisDisabled = false;
+    imageEmptyStreak = 0;
+    imageAnalysisError = '';
+    headPy.resetForRun();
     var colorRequested = !!(cfg.colorMode && cfg.colorMode != 'off');
-    if (colorRequested) colorFeatures.resetForRun();
-    initializeUnknownGenders(items);
+    if (colorRequested) colorPy.resetForRun();
+    initGenders(items);
     for (var i = 0; i < items.length; i++) {
         items[i].colorPalette = null;
         items[i].headTurnValid = false;
@@ -2551,26 +2474,24 @@ function analyzeSemantics(items) {
     }
     var hasPhotoCapableLayer = false;
     for (i = 0; i < items.length; i++) if (items[i].kind != 4) { hasPhotoCapableLayer = true; break; }
-    var genderReady = cfg.alternateGender && pythonFeatures.ensureReady(),
-        headReady = cfg.considerHeadTurn && hasPhotoCapableLayer && headTurnFeatures.ensureReady(),
-        colorReady = colorRequested && hasPhotoCapableLayer && colorFeatures.ensureReady(),
+    var genderReady = cfg.alternateGender && genderPy.ensureReady(),
+        headReady = cfg.considerHeadTurn && hasPhotoCapableLayer && headPy.ensureReady(),
+        colorReady = colorRequested && hasPhotoCapableLayer && colorPy.ensureReady(),
         byId = {}, payload = [], result;
     if (genderReady) {
         for (i = 0; i < items.length; i++) payload.push({ id: items[i].id, name: items[i].name });
-        var nameCall = pythonFeatures.call('gender_names', payload, { photo: false });
+        var nameCall = genderPy.call('gender_names', payload, { photo: false });
         if (nameCall.ok && nameCall.value instanceof Array) {
             for (i = 0; i < nameCall.value.length; i++) {
                 result = nameCall.value[i];
                 if (result && result.id != undefined) byId[String(result.id)] = result;
             }
-        } else if (nameCall.ok) pythonFeatures.recordFailure('gender_names_invalid', str.t('Некорректный ответ анализа имён.', 'Invalid name-analysis response.'));
+        } else if (nameCall.ok) genderPy.recordFailure('gender_names_invalid', str.t('Некорректный ответ анализа имён.', 'Invalid name-analysis response.'));
         for (i = 0; i < items.length; i++) applyGenderResult(items[i], byId[String(items[i].id)]);
     }
-    setLayoutProgressRange(.1, .9); // Reserve initialization/name analysis before the per-photo slices.
+    setProgressRange(.1, .9);
     var photoItems = [], previewHistoryTouched = false;
     for (i = 0; i < items.length; i++)
-        // Native vector shape layers are layout objects, not photographs. Their
-        // names may still resolve gender, but JPEG/vision analysis is skipped.
         if (items[i].kind != 4 && (colorReady || headReady || (genderReady && items[i].gender == 'U'))) photoItems.push(items[i]);
     if (photoItems.length) {
         var parentDocumentId = doc.getProperty('documentID'),
@@ -2581,26 +2502,26 @@ function analyzeSemantics(items) {
         try {
             for (i = 0; i < photoItems.length; i++) {
                 var target = photoItems[i],
-                    wantGender = genderReady && !pythonFeatures.isDisabled() && target.gender == 'U',
-                    wantHead = headReady && !headTurnFeatures.isDisabled(),
-                    wantColor = colorReady && !colorFeatures.isDisabled();
+                    wantGender = genderReady && !genderPy.isDisabled() && target.gender == 'U',
+                    wantHead = headReady && !headPy.isDisabled(),
+                    wantColor = colorReady && !colorPy.isDisabled();
                 if (!wantGender && !wantHead && !wantColor) continue;
                 progress(30 + 2 * i / Math.max(1, photoItems.length), 'Photo ' + i + '/' + photoItems.length);
                 var previewPath = null;
                 try {
                     previewHistoryTouched = true;
                     previewPath = createGenderPreview(target, parentDocumentId, analysisAnchorHistory);
-                    beginPythonProgressWait(1 / Math.max(1, photoItems.length), 4000);
-                    var driver = wantGender ? pythonFeatures : wantHead ? headTurnFeatures : colorFeatures,
-                        other = wantGender && wantHead ? headTurnFeatures : null,
+                    beginPythonWait(1 / Math.max(1, photoItems.length), 4000);
+                    var driver = wantGender ? genderPy : wantHead ? headPy : colorPy,
+                        other = wantGender && wantHead ? headPy : null,
                         call = driver.call('analyze_image', {
                             id: target.id, name: target.name, path: previewPath,
                             gender: wantGender, head_turn: wantHead, color: wantColor
                         }, { photo: true, deferSuccess: true });
                     if (!call.ok) {
-                        semanticImageEmptyStreak = 0;
+                        imageEmptyStreak = 0;
                         if (other) other.recordPhotoFailure(call.reason || 'python_error', call.message);
-                        if (wantColor && driver != colorFeatures) colorFeatures.recordPhotoFailure(call.reason || 'python_error', call.message);
+                        if (wantColor && driver != colorPy) colorPy.recordPhotoFailure(call.reason || 'python_error', call.message);
                         target.headTurnReason = call.reason || 'python_error';
                         if (wantGender) target.genderReason = call.reason || 'python_error';
                         continue;
@@ -2613,13 +2534,13 @@ function analyzeSemantics(items) {
                     if (wantGender) {
                         semanticRequestedCount++;
                         var genderResult = validEnvelope ? answer.gender : null,
-                            genderOutcome = classifyPhotoAnalysisOutcome(genderResult);
+                            genderOutcome = classifyAnalysisResult(genderResult);
                         if (genderOutcome.failure) {
                             semanticResultFailure = true;
-                            pythonFeatures.recordPhotoFailure(genderOutcome.reason, genderOutcome.message);
+                            genderPy.recordPhotoFailure(genderOutcome.reason, genderOutcome.message);
                             target.genderReason = genderOutcome.reason;
                         } else {
-                            pythonFeatures.recordSuccess();
+                            genderPy.recordSuccess();
                             applyGenderResult(target, genderResult);
                             if (genderResult.analysis_status == 'ok' && (genderResult.sex == 'M' || genderResult.sex == 'F')) semanticUsefulCount++;
                         }
@@ -2629,9 +2550,9 @@ function analyzeSemantics(items) {
                         var colorResult = validEnvelope ? answer.color : null, colorOutcome = classifyColorOutcome(colorResult);
                         if (colorOutcome.failure) {
                             semanticResultFailure = true;
-                            colorFeatures.recordPhotoFailure(colorOutcome.reason, colorOutcome.message);
+                            colorPy.recordPhotoFailure(colorOutcome.reason, colorOutcome.message);
                         } else {
-                            colorFeatures.recordSuccess();
+                            colorPy.recordSuccess();
                             if (colorResult.analysis_status == 'ok') {
                                 target.colorPalette = colorResult.palette;
                                 semanticUsefulCount++;
@@ -2644,10 +2565,10 @@ function analyzeSemantics(items) {
                             headOutcome = classifyHeadTurnOutcome(headResult);
                         if (headOutcome.failure) {
                             semanticResultFailure = true;
-                            headTurnFeatures.recordPhotoFailure(headOutcome.reason, headOutcome.message);
+                            headPy.recordPhotoFailure(headOutcome.reason, headOutcome.message);
                             target.headTurnReason = headOutcome.reason;
                         } else {
-                            headTurnFeatures.recordSuccess();
+                            headPy.recordSuccess();
                             target.headTurnValid = headResult.analysis_status == 'ok';
                             target.headTurn = target.headTurnValid ? Number(headResult.turn) : 0;
                             target.headTurnReason = headResult.reason || '';
@@ -2657,41 +2578,40 @@ function analyzeSemantics(items) {
                                 typeof headResult.roll_degrees == 'number' && isFinite(headResult.roll_degrees) &&
                                 typeof headResult.pitch_degrees == 'number' && isFinite(headResult.pitch_degrees);
                             if (target.headLeanValid) {
-                                // MediaPipe +roll leans toward image-left; yaw's +sign is image-right.
                                 target.headLean = -headResult.roll_degrees;
                                 target.headLeanWeight = Math.max(0, 1 - Math.abs(headResult.pitch_degrees) / 35);
                             }
                         }
                     }
                     if (semanticRequestedCount) {
-                        if (semanticResultFailure) semanticImageEmptyStreak = 0;
-                        else recordSemanticImageOutcome(semanticUsefulCount > 0);
+                        if (semanticResultFailure) imageEmptyStreak = 0;
+                        else recordAnalysisResult(semanticUsefulCount > 0);
                     }
                 } catch (e) {
                     if (e.number == 8007 || e.autoLayoutRestoreFailure) throw e;
                     var message = e.message ? e.message : String(e);
-                    semanticImageEmptyStreak = 0;
-                    if (wantGender) pythonFeatures.recordPhotoFailure('preview_error', message);
-                    if (wantHead) headTurnFeatures.recordPhotoFailure('preview_error', message);
-                    if (wantColor) colorFeatures.recordPhotoFailure('preview_error', message);
+                    imageEmptyStreak = 0;
+                    if (wantGender) genderPy.recordPhotoFailure('preview_error', message);
+                    if (wantHead) headPy.recordPhotoFailure('preview_error', message);
+                    if (wantColor) colorPy.recordPhotoFailure('preview_error', message);
                     target.headTurnReason = 'preview_error';
                     if (wantGender) target.genderReason = 'preview_error';
                 } finally {
                     if (previewPath && !removePreview(previewPath)) {
-                        try { pythonApi.cleanup(previewPath); } catch (cleanupError) { }
+                        try { py.cleanup(previewPath); } catch (cleanupError) { }
                     }
                     progress(30 + 2 * (i + 1) / Math.max(1, photoItems.length), 'Photo ' + (i + 1) + '/' + photoItems.length);
                 }
-                if (semanticImageAnalysisDisabledForRun) break;
+                if (imageAnalysisDisabled) break;
             }
         } finally {
             restoreAnalysisHistory(parentDocumentId, analysisBaseHistory, false);
         }
     }
     var failureMessages = [], featureStates = [];
-    if (cfg.alternateGender) featureStates.push(pythonFeatures.getState());
-    if (cfg.considerHeadTurn && hasPhotoCapableLayer) featureStates.push(headTurnFeatures.getState());
-    if (colorRequested && hasPhotoCapableLayer) featureStates.push(colorFeatures.getState());
+    if (cfg.alternateGender) featureStates.push(genderPy.getState());
+    if (cfg.considerHeadTurn && hasPhotoCapableLayer) featureStates.push(headPy.getState());
+    if (colorRequested && hasPhotoCapableLayer) featureStates.push(colorPy.getState());
     for (i = 0; i < featureStates.length; i++) {
         var message = featureStates[i].message;
         if (message && !arrayContains(failureMessages, message)) failureMessages.push(message);
@@ -2699,30 +2619,28 @@ function analyzeSemantics(items) {
     progress(32, 'Analysis complete');
     return {
         failureMessage: failureMessages.join('\n'),
-        gender: cfg.alternateGender ? finalizeGenderSummary(items, !genderReady || pythonFeatures.isDisabled()) : null,
-        headTurn: cfg.considerHeadTurn ? finalizeHeadTurnSummary(items, !headReady || headTurnFeatures.isDisabled()) : null,
+        gender: cfg.alternateGender ? finalizeGenderSummary(items, !genderReady || genderPy.isDisabled()) : null,
+        headTurn: cfg.considerHeadTurn ? finalizeHeadTurnSummary(items, !headReady || headPy.isDisabled()) : null,
         color: colorRequested ? finalizeColorSummary(items) : null,
         previewHistoryTouched: previewHistoryTouched
     };
 }
 
-function recordSemanticImageOutcome(hasUsefulValue) {
-    if (semanticImageAnalysisDisabledForRun) return;
+function recordAnalysisResult(hasUsefulValue) {
+    if (imageAnalysisDisabled) return;
     if (hasUsefulValue) {
-        semanticImageEmptyStreak = 0;
+        imageEmptyStreak = 0;
         return;
     }
 
-    semanticImageEmptyStreak++;
-    if (semanticImageEmptyStreak < OPTIONAL_PYTHON_EMPTY_LIMIT) return;
+    imageEmptyStreak++;
+    if (imageEmptyStreak < OPTIONAL_PYTHON_EMPTY_LIMIT) return;
 
-    semanticImageAnalysisDisabledForRun = true;
-    semanticImageFallbackReason = str.t('Покадровый Python-анализ отключён до конца запуска после ', 'Per-image Python analysis was disabled for the rest of this run after ') +
+    imageAnalysisDisabled = true;
+    imageAnalysisError = str.t('Покадровый Python-анализ отключён до конца запуска после ', 'Per-image Python analysis was disabled for the rest of this run after ') +
         OPTIONAL_PYTHON_EMPTY_LIMIT + str.t(' последовательных слоёв без полезного результата запрошенных признаков.', ' consecutive layers returned no useful result for the requested features.');
-    // Once the input looks like non-photographic frames, do not spend more time
-    // on the optional Python packing either. The JSX geometry core remains active.
-    packingDisabledForRun = true;
-    if (!packingFallbackReason) packingFallbackReason = semanticImageFallbackReason;
+    packingDisabled = true;
+    if (!packingError) packingError = imageAnalysisError;
 }
 
 function classifyColorOutcome(result) {
@@ -2748,12 +2666,10 @@ function finalizeColorSummary(items) {
     var known = 0;
     for (var i = 0; i < items.length; i++) if (items[i].colorPalette) known++;
     return { known: known, unknown: items.length - known, fallbackToGeometry: known < 2,
-        mode: cfg.colorMode, pythonMessage: colorFeatures.getState().message };
+        mode: cfg.colorMode, pythonMessage: colorPy.getState().message };
 }
 
 function paletteDistance(a, b) {
-    // Energy distance between weighted Lab palettes: recognises different
-    // proportions even when both garments contain the same set of colours.
     function expected(p, q) {
         var total = 0;
         for (var i = 0; i < p.length; i++) for (var j = 0; j < q.length; j++) {
@@ -2780,10 +2696,6 @@ function paletteTone(palette) {
 function colorAssignmentCost(plan, mode, distances) {
     mode = normalizeColorMode(mode);
     distances = distances || {};
-    // Build a fixed positional neighbour graph from actual physical rows:
-    // adjacent portraits in the same physical row and the nearest portrait only
-    // in the immediately following physical row. Rows from separate zones that
-    // share the same Y coordinate belong to one physical row.
     var positions = {}, physicalRows = [], rowRefs = [], total = 0, weights = 0, edges = {};
     for (var pi = 0; pi < plan.placements.length; pi++) positions[String(plan.placements[pi].layerId)] = plan.placements[pi];
     for (var r = 0; r < plan.rows.length; r++) rowRefs.push({ index: r, top: Number(plan.rows[r].y) });
@@ -2840,8 +2752,6 @@ function betterColorOrder(cost, bestCost) {
     return cost < bestCost - 1e-8;
 }
 
-// Compare every trial with the original semantic result, never the last swap:
-// this prevents successive small concessions from accumulating into large turns.
 function buildColorPoseContext(baseline, geometry) {
     var positions = {}, photos = {}, i, r, c;
     for (i = 0; i < baseline.placements.length; i++)
@@ -2870,7 +2780,7 @@ function colorPoseCompatible(candidate, baseline, geometry, context) {
     return true;
 }
 
-function colorSemanticsCompatible(score, baseline) {
+function colorCompatible(score, baseline) {
     return score.horizontalBad <= baseline.horizontalBad && score.horizontal >= baseline.horizontal &&
         score.symmetry <= baseline.symmetry && score.minorityCenter <= baseline.minorityCenter + 1e-8 &&
         score.vertical >= baseline.vertical;
@@ -2878,7 +2788,7 @@ function colorSemanticsCompatible(score, baseline) {
 
 function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
     mode = normalizeColorMode(mode);
-    var distances = {}, tones = {}, best = plan, baseline = getSemanticAssignmentScore(plan, geometry, useGender, useHead),
+    var distances = {}, tones = {}, best = plan, baseline = semanticScore(plan, geometry, useGender, useHead),
         bestCost = colorAssignmentCost(plan, mode, distances), initialCost = bestCost, slots = [],
         poseContext = useHead ? buildColorPoseContext(plan, geometry) : null;
     function cachedTone(item) {
@@ -2888,8 +2798,6 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
     }
     for (var r = 0; r < plan.rows.length; r++) for (var c = 0; c < plan.rows[r].items.length; c++) slots.push({ row: r, col: c });
     if (mode == 'harmonious') {
-        // Global seed makes color-only behaviour visible even when pairwise
-        // neighbourhood search gets trapped at a local minimum.
         var pools = {}, locations = {}, seedRows = [], rr, cc;
         for (rr = 0; rr < plan.rows.length; rr++) {
             seedRows.push(plan.rows[rr].items.slice(0));
@@ -2915,23 +2823,19 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
         }
         var seeded = rebuildAssignedLayout(plan, geometry, seedRows, true);
         if (seeded) {
-            var seedScore = getSemanticAssignmentScore(seeded, geometry, useGender, useHead), seedCost = colorAssignmentCost(seeded, mode, distances);
-            if (colorSemanticsCompatible(seedScore, baseline) &&
+            var seedScore = semanticScore(seeded, geometry, useGender, useHead), seedCost = colorAssignmentCost(seeded, mode, distances);
+            if (colorCompatible(seedScore, baseline) &&
                 (!useHead || colorPoseCompatible(seeded, plan, geometry, poseContext)) && betterColorOrder(seedCost, bestCost)) {
                 best = seeded; bestCost = seedCost;
             }
         }
     }
-    // Preserve gender composition and symmetry; allow bounded pose alternatives.
-    // Trials use the same reflow/containment validator and unchanged scale/gaps.
     for (var pass = 0; pass < 8; pass++) {
-        layoutUnitProgress(pass, 8, 'Color: pass ' + (pass + 1) + ' of max 8');
+        unitProgress(pass, 8, 'Color: pass ' + (pass + 1) + ' of max 8');
         var changed = false;
-        // Every photo participates, including sheets above 80 items. Large
-        // sheets use globally spaced partners, not a fixed subset of photos.
         var search = slots, partnerCount = Math.min(16, Math.max(0, slots.length - 1));
         for (var a = 0; a < search.length; a++) {
-          if (a % 8 == 0) layoutUnitProgress(pass + a / Math.max(1, search.length), 8, 'Color: pass ' + (pass + 1) + ', positions ' + a + '/' + search.length);
+          if (a % 8 == 0) unitProgress(pass + a / Math.max(1, search.length), 8, 'Color: pass ' + (pass + 1) + ', positions ' + a + '/' + search.length);
           for (var pairIndex = 0; pairIndex < (slots.length > 80 ? partnerCount : search.length - a - 1); pairIndex++) {
             var b = slots.length > 80 ? (a + 1 + (Math.floor(pairIndex * (slots.length - 1) / partnerCount) + pass) % (slots.length - 1)) % slots.length : a + 1 + pairIndex;
             var sa = search[a], sb = search[b], ia = best.rows[sa.row].items[sa.col], ib = best.rows[sb.row].items[sb.col];
@@ -2945,27 +2849,27 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
             rows[sa.row][sa.col] = ib; rows[sb.row][sb.col] = ia;
             var candidate = rebuildAssignedLayout(best, geometry, rows, true);
             if (!candidate) continue;
-            var score = getSemanticAssignmentScore(candidate, geometry, useGender, useHead);
-            if (!colorSemanticsCompatible(score, baseline) ||
+            var score = semanticScore(candidate, geometry, useGender, useHead);
+            if (!colorCompatible(score, baseline) ||
                 (useHead && !colorPoseCompatible(candidate, plan, geometry, poseContext))) continue;
             var cost = colorAssignmentCost(candidate, mode, distances);
             if (betterColorOrder(cost, bestCost)) { best = candidate; bestCost = cost; changed = true; }
         }
         }
         if (!changed) break;
-        progress(currentProgressValue, 'Color optimization: ' + (pass + 1));
+        progress(progressValue, 'Color optimization: ' + (pass + 1));
     }
     validateLayoutPlan(best, geometry);
     if (best == plan) { best = {}; for (var key in plan) if (plan.hasOwnProperty(key)) best[key] = plan[key]; }
     best.headTurnSummary = plan.headTurnSummary;
-    best.semanticAssignment = getSemanticAssignmentScore(best, geometry, useGender, useHead);
+    best.semanticAssignment = semanticScore(best, geometry, useGender, useHead);
     if (plan.headTurnOrdering) {
         best.headTurnOrdering = {};
         for (var hk in plan.headTurnOrdering) if (plan.headTurnOrdering.hasOwnProperty(hk)) best.headTurnOrdering[hk] = plan.headTurnOrdering[hk];
         best.headTurnOrdering.finalCost = best.semanticAssignment.head;
     }
     if (useGender) {
-        best.genderCheckerboard = getGenderCheckerboardStats(best);
+        best.genderCheckerboard = genderStats(best);
     }
     var moved = 0;
     for (var mr = 0; mr < plan.rows.length; mr++) for (var mc = 0; mc < plan.rows[mr].items.length; mc++)
@@ -2986,7 +2890,7 @@ function classifyHeadTurnOutcome(result) {
 }
 
 function finalizeHeadTurnSummary(items, fallback) {
-    var state = headTurnFeatures.getState(), summary = {
+    var state = headPy.getState(), summary = {
         total: items.length, known: 0, frontal: 0, left: 0, right: 0, unknown: 0,
         byBody: 0, byHeadOnly: 0, fallbackToGeometry: !!fallback, pythonMessage: state.message
     };
@@ -3003,7 +2907,7 @@ function finalizeHeadTurnSummary(items, fallback) {
     return summary;
 }
 
-function initializeUnknownGenders(items) {
+function initGenders(items) {
     if (!items) return;
     for (var i = 0; i < items.length; i++) {
         items[i].gender = 'U';
@@ -3013,7 +2917,7 @@ function initializeUnknownGenders(items) {
     }
 }
 
-function classifyPhotoAnalysisOutcome(result) {
+function classifyAnalysisResult(result) {
     if (!result || (result.sex != 'M' && result.sex != 'F' && result.sex != 'U') ||
         !isFinite(Number(result.confidence)) || Number(result.confidence) < 0 || Number(result.confidence) > 1 ||
         !/^(ok|uncertain|technical_failure|not_applicable)$/.test(String(result.analysis_status)))
@@ -3030,8 +2934,6 @@ function classifyPhotoAnalysisOutcome(result) {
     if (status == 'not_applicable')
         return { failure: false };
 
-    // "uncertain" is a valid model result: the method worked, confidence was
-    // simply insufficient. It must reset the consecutive-failure streak.
     return { failure: false };
 }
 
@@ -3049,7 +2951,7 @@ function photoAnalysisReasonText(reason, technical) {
 }
 
 function finalizeGenderSummary(items, forceFallback) {
-    var state = pythonFeatures.getState(),
+    var state = genderPy.getState(),
         summary = {
             total: items ? items.length : 0,
             male: 0,
@@ -3096,7 +2998,6 @@ function restoreAnalysisHistory(parentDocumentId, anchorHistory, usePrevious) {
         else throw new Error(str.t('Точка восстановления истории недоступна.', 'The history restore point is unavailable.'));
         return;
     } catch (historyError) {
-        // A failed previous-state rollback may still recover through the anchor.
         try {
             if (doc.getProperty('documentID') != parentDocumentId) doc.close(false);
             if (doc.getProperty('documentID') != parentDocumentId || !anchorHistory) throw historyError;
@@ -3110,8 +3011,6 @@ function restoreAnalysisHistory(parentDocumentId, anchorHistory, usePrevious) {
     }
 }
 
-// Use a global suspendHistory entry point, independent of caller-local lookup.
-// The callback holds the per-photo state through a normal JavaScript closure.
 function autoLayoutPreviewWork() {
     if (typeof previewWork != 'function') throw new Error('Preview callback is unavailable');
     previewWork();
@@ -3122,7 +3021,7 @@ function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
         previewStateCreated = false;
 
     lr.selectLayers([item.id]);
-    var previousWork = typeof previewWork == 'undefined' ? null : previewWork;
+    var previousWork = previewWork;
     previewWork = function () { makePreview(result); };
     try {
         app.activeDocument.suspendHistory('Auto layout preview', 'autoLayoutPreviewWork();');
@@ -3149,10 +3048,10 @@ function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
             docW = doc.getProperty('width') * docRes / 72,
             docH = doc.getProperty('height') * docRes / 72,
             f = new File(Folder.temp + '/ALG_' + doc.getProperty('documentID') + '_' +
-                (new Date()).getTime() + '_' + Math.floor(Math.random() * 1000000) + '.jpg'),
+                (new Date).getTime() + '_' + Math.floor(Math.random() * 1000000) + '.jpg'),
             k = GENDER_PREVIEW_SIZE / Math.min(docW, docH);
 
-        pendingPreviews.push(f.fsName);
+        previews.push(f.fsName);
         if (k < 1) doc.setScale(k);
         doc.saveACopy(f);
         o.path = f.fsName;
@@ -3160,7 +3059,7 @@ function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
     }
 }
 
-function refreshLayoutLayerReferences(items) {
+function refreshLayerRefs(items) {
     if (!items || !items.length) return;
 
     function readIdentity(id) {
@@ -3183,7 +3082,7 @@ function refreshLayoutLayerReferences(items) {
             resolvedId = oldId;
 
         if (!valid) {
-            resolvedId = lr.getProperty('layerID', item.itemIndex, true);
+            resolvedId = lr.getProperty('layerID', false, item.itemIndex, true);
             if (resolvedId === false || resolvedId == undefined)
                 throw new Error(str.t('После подготовки превью Photoshop потерял ссылку на слой "', 'After preparing the preview, Photoshop lost the reference to layer "') + item.name + str.t('".', '".'));
 
@@ -3206,7 +3105,7 @@ function refreshLayoutLayerReferences(items) {
 }
 
 
-function validateSourceLayersBeforeApply() {
+function validateSources() {
     if (!sourceState || !sourceState.layerIds || !sourceState.layerIds.length)
         throw new Error(str.t('Не удалось восстановить выбранные слои перед применением раскладки.', 'Could not restore the selected layers before applying the layout.'));
 
@@ -3216,7 +3115,7 @@ function validateSourceLayersBeforeApply() {
     for (i = 0; i < sourceState.layerIds.length; i++) {
         var id = sourceState.layerIds[i],
             key = String(id),
-            kind = lr.getProperty('layerKind', id);
+            kind = lr.getProperty('layerKind', false, id);
         if (seen[key]) throw new Error(str.t('Перед применением раскладки обнаружена повторная ссылка на слой ID ', 'A duplicate layer reference was found before applying the layout. Layer ID ') + id + '.');
         seen[key] = true;
         if (kind != 1 && kind != 4 && kind != 5)
@@ -3236,18 +3135,16 @@ function removePreview(path) {
 }
 
 function cleanupPreviews() {
-    for (var i = 0; i < pendingPreviews.length; i++) {
-        var path = pendingPreviews[i];
+    for (var i = 0; i < previews.length; i++) {
+        var path = previews[i];
         if (!removePreview(path)) {
-            try { pythonApi.cleanup(path); } catch (e) { }
+            try { py.cleanup(path); } catch (e) { }
             if (!removePreview(path)) $.writeln('Auto layout: deferred JPEG cleanup: ' + path);
         }
     }
-    pendingPreviews = [];
+    previews = [];
 }
 
-// Assign children to a valid geometric skeleton, then reflow the SAME row count,
-// scale and gaps. This permits useful cross-row swaps of different-size photos.
 function measureLayoutRow(items) {
     var width = 0, height = 0;
     for (var i = 0; i < items.length; i++) {
@@ -3289,9 +3186,6 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
             width = spec.contentWidth, count = itemRows[r].length,
             intervalWidth = original.availableInterval.right - original.availableInterval.left;
         fixed.byRow[String(r)] = original.gapX;
-        // Left / Center / Right preserve one common visual gap during semantic swaps.
-        // Unlocked Justify is different: its gap is recalculated from the FINAL
-        // row contents so that the row still reaches both interval edges.
         if (cfg.horizontalAlign != 'justify' &&
             width * plan.commonScale + original.gapX * Math.max(0, count - 1) > intervalWidth + 1e-7) return null;
         if (cfg.horizontalAlign == 'justify' && count > 1 &&
@@ -3301,7 +3195,7 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
     if (geometry.isRectangle) {
         var indices = [];
         for (r = 0; r < specs.length; r++) indices.push(r);
-        if (!placeContainerVerticalGroup(specs, indices, plan.commonScale, plan.actualGapY,
+        if (!placeVerticalGroup(specs, indices, plan.commonScale, plan.actualGapY,
             geometry.bounds.top, geometry.bounds.bottom)) return null;
     } else if (geometry.multiZone) {
         var zones = flattenComponentZones(geometry.components), groups = {};
@@ -3313,7 +3207,7 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
         for (key in groups) {
             if (!groups.hasOwnProperty(key)) continue;
             var zone = zones[Number(key)];
-            if (!zone || !placeContainerVerticalGroup(specs, groups[key], plan.commonScale, plan.actualGapY, zone.top, zone.bottom)) return null;
+            if (!zone || !placeVerticalGroup(specs, groups[key], plan.commonScale, plan.actualGapY, zone.top, zone.bottom)) return null;
         }
     } else {
         indices = [];
@@ -3335,13 +3229,11 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
     candidate.autoRows = plan.autoRows;
     candidate.genderSummary = plan.genderSummary;
     candidate.genderPasses = plan.genderPasses;
-    // Row containers/ranges prove non-overlap. Trial permutations preserve IDs;
-    // do not run the quadratic pairwise placement check for every candidate.
     for (r = 0; r < candidate.rows.length; r++) {
         var cr = candidate.rows[r], bottom = cr.y + cr.rowHeight * plan.commonScale;
         if (cr.y < geometry.bounds.top - 0.05 || bottom > geometry.bounds.bottom + 0.05) return null;
         if (!geometry.isRectangle) {
-            var allowed = getIntervalsForVerticalSpan(geometry, cr.y, bottom), contained = false;
+            var allowed = getVerticalIntervals(geometry, cr.y, bottom), contained = false;
             for (c = 0; c < allowed.length; c++)
                 if (cr.availableInterval.left >= allowed[c].left - 0.05 && cr.availableInterval.right <= allowed[c].right + 0.05) { contained = true; break; }
             if (!contained) return null;
@@ -3354,8 +3246,8 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
     return candidate;
 }
 
-function getSemanticAssignmentScore(plan, geometry, useGender, useHead) {
-    var stats = useGender ? getGenderCheckerboardStats(plan) : {}, centerPenalty = stats.minorityCenterPenalty, headCost = 0, smoothCost = 0, leanCost = 0,
+function semanticScore(plan, geometry, useGender, useHead) {
+    var stats = useGender ? genderStats(plan) : {}, centerPenalty = stats.minorityCenterPenalty, headCost = 0, smoothCost = 0, leanCost = 0,
         center = (geometry.bounds.left + geometry.bounds.right) / 2, half = Math.max(1, geometry.bounds.width / 2),
         positions = {}, r, c;
     if (useHead) for (var i = 0; i < plan.placements.length; i++) positions[String(plan.placements[i].layerId)] = plan.placements[i].targetCenterX;
@@ -3387,7 +3279,7 @@ function getSemanticAssignmentScore(plan, geometry, useGender, useHead) {
         directionCost: headCost, smoothCost: smoothCost, leanCost: leanCost };
 }
 
-function betterSemanticAssignment(a, b, useHead) {
+function betterSemantic(a, b, useHead) {
     if (!a) return false;
     if (!b) return true;
     if (a.horizontalBad != b.horizontalBad) return a.horizontalBad < b.horizontalBad;
@@ -3399,8 +3291,8 @@ function betterSemanticAssignment(a, b, useHead) {
     return false;
 }
 
-function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
-    var best = plan, initial = getSemanticAssignmentScore(plan, geometry, useGender, useHead), bestScore = initial,
+function optimizeSemantics(plan, geometry, useGender, useHead) {
+    var best = plan, initial = semanticScore(plan, geometry, useGender, useHead), bestScore = initial,
         slots = [], r, c;
     for (r = 0; r < plan.rows.length; r++) for (c = 0; c < plan.rows[r].items.length; c++) slots.push({ row: r, column: c });
     function copyRows(p) {
@@ -3411,8 +3303,8 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
     function consider(rows) {
         var candidate = rebuildAssignedLayout(plan, geometry, rows, true);
         if (!candidate) return null;
-        var score = getSemanticAssignmentScore(candidate, geometry, useGender, useHead);
-        if (betterSemanticAssignment(score, roundScore, useHead)) { roundBest = candidate; roundScore = score; }
+        var score = semanticScore(candidate, geometry, useGender, useHead);
+        if (betterSemantic(score, roundScore, useHead)) { roundBest = candidate; roundScore = score; }
         return candidate;
     }
     function sortedEqualSizeRows(p) {
@@ -3443,12 +3335,8 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
         var original = plan.rows[rowIndex], available = original.availableInterval.right - original.availableInterval.left;
         return rawWidth * plan.commonScale + original.gapX * Math.max(0, original.items.length - 1) <= available + 1e-7;
     }
-    // Multi-pass whole-plan refinement: all same-sex cross-row exchanges, and
-    // alternative row patterns with equal counts, are assessed after real reflow.
-    // Reuse candidates that were already rebuilt for the immediate head-order
-    // follow-up instead of rebuilding the same assignment twice.
     for (var pass = 0; pass < 12; pass++) {
-        layoutUnitProgress(pass, 12, 'Gender and pose: pass ' + (pass + 1) + ' of max 12');
+        unitProgress(pass, 12, 'Gender and pose: pass ' + (pass + 1) + ' of max 12');
         var roundBest = best, roundScore = bestScore, baseRows = copyRows(best), rowWidths = [];
         for (r = 0; r < baseRows.length; r++) {
             var rawWidth = 0;
@@ -3458,7 +3346,7 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
         if (useGender) {
             var allItems = [];
             for (var gr = 0; gr < baseRows.length; gr++) allItems = allItems.concat(baseRows[gr]);
-            var globalOrder = reorderItemsForGenderCheckerboard(allItems, plan.distribution), globalRows = [], offset = 0;
+            var globalOrder = sortGenderCheckerboard(allItems, plan.distribution), globalRows = [], offset = 0;
             for (gr = 0; gr < plan.distribution.length; gr++) {
                 globalRows.push(globalOrder.slice(offset, offset + plan.distribution[gr]));
                 offset += plan.distribution[gr];
@@ -3474,7 +3362,7 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
                 tokens.push(item.gender); pools[item.gender].push(item);
             }
             var centered = [{ tokens: tokens.slice(0) }];
-            centerMinorityGenderRows(centered);
+            centerMinorityRows(centered);
             variants.push(centered[0].tokens);
             variants.push(centered[0].tokens.slice(0).reverse());
             for (var v = 0; v < variants.length; v++) {
@@ -3506,7 +3394,7 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
             }
         }
         if (useGender || useHead) for (var a = 0; a < searchSlots.length; a++) {
-            if ((a % 8) == 0) layoutUnitProgress(pass + a / Math.max(1, searchSlots.length), 12, 'Gender and pose: pass ' + (pass + 1) + ', positions ' + a + '/' + searchSlots.length);
+            if ((a % 8) == 0) unitProgress(pass + a / Math.max(1, searchSlots.length), 12, 'Gender and pose: pass ' + (pass + 1) + ', positions ' + a + '/' + searchSlots.length);
             for (var b = a + 1; b < searchSlots.length; b++) {
                 var sa = searchSlots[a], sb = searchSlots[b], ai = baseRows[sa.row][sa.column], bi = baseRows[sb.row][sb.column];
                 if (getItemPriority(ai) != getItemPriority(bi)) continue;
@@ -3514,16 +3402,11 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
                     poseChange = useHead && ai.headTurnValid && bi.headTurnValid && (ai.headTurn != bi.headTurn ||
                         (ai.headLeanValid ? ai.headLeanWeight * ai.headLean : 0) != (bi.headLeanValid ? bi.headLeanWeight * bi.headLean : 0));
                 if (!genderChange && !poseChange) continue;
-                // Fast reject is exactly the first horizontal-fit condition used
-                // by rebuildAssignedLayout; it only skips candidates that would
-                // be rejected there anyway.
                 if (sa.row != sb.row) {
                     var widthA = rowWidths[sa.row] - ai.width + bi.width,
                         widthB = rowWidths[sb.row] - bi.width + ai.width;
                     if (!rowWidthFits(sa.row, widthA) || !rowWidthFits(sb.row, widthB)) continue;
                 }
-                // Gender repair does not depend on pose availability. Counts
-                // may move between rows; only total M/F/U counts are invariant.
                 var rows = copyRows(best);
                 rows[sa.row][sa.column] = bi; rows[sb.row][sb.column] = ai;
                 consider(rows);
@@ -3539,7 +3422,7 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
         for (var property in plan) if (plan.hasOwnProperty(property)) unchanged[property] = plan[property];
         best = unchanged;
     }
-    if (useGender) best.genderCheckerboard = getGenderCheckerboardStats(best);
+    if (useGender) best.genderCheckerboard = genderStats(best);
     if (useHead) best.headTurnOrdering = { centerX: (geometry.bounds.left + geometry.bounds.right) / 2,
         initialCost: initial.head, finalCost: bestScore.head, smoothCost: bestScore.smoothCost, passes: pass };
     best.semanticAssignment = bestScore;
@@ -3547,36 +3430,30 @@ function optimizeSemanticAssignment(plan, geometry, useGender, useHead) {
 }
 
 
-function buildGenderAwareLayoutPlan(items, geometry) {
-    // Geometry stays authoritative. First discover the geometric row distribution,
-    // then feed a checkerboard ordering through the same unchanged solver. If the
-    // reordered dimensions change the chosen distribution, converge for at most
-    // two additional passes.
-    setLayoutProgressRange(0, .25);
+function buildGenderLayout(items, geometry) {
+    setProgressRange(0, .25);
     var seedPlan = buildLayoutPlan(items, geometry);
     if (!seedPlan) return null;
 
-    if (seedPlan.pythonPacking || seedPlan.lockedMetrics) return seedPlan; // The shared semantic optimizer handles M/F without a second Python search.
+    if (seedPlan.pythonPacking || seedPlan.lockedMetrics) return seedPlan;
     var distribution = seedPlan.distribution.slice(0),
         best = null,
         previousSignature = '',
         pass;
 
     for (pass = 0; pass < 3; pass++) {
-        setLayoutProgressRange(.25 + pass * .25, .25);
-        var ordered = reorderItemsForGenderCheckerboard(items, distribution),
+        setProgressRange(.25 + pass * .25, .25);
+        var ordered = sortGenderCheckerboard(items, distribution),
             signature = getItemOrderSignature(ordered) + '|' + distribution.join(','),
             candidate = null;
         try { candidate = buildLayoutPlan(ordered, geometry); }
         catch (semanticLayoutError) {
             if (semanticLayoutError.number == 8007) throw semanticLayoutError;
-            // The original palette-order plan already fits. A semantic reorder
-            // must not make a valid geometry-only layout fail.
             break;
         }
         if (!candidate) break;
 
-        var stats = getGenderCheckerboardStats(candidate);
+        var stats = genderStats(candidate);
         candidate.genderCheckerboard = stats;
         candidate.genderPasses = pass + 1;
 
@@ -3588,7 +3465,7 @@ function buildGenderAwareLayoutPlan(items, geometry) {
     }
 
     if (!best) {
-        seedPlan.genderCheckerboard = getGenderCheckerboardStats(seedPlan);
+        seedPlan.genderCheckerboard = genderStats(seedPlan);
         seedPlan.genderPasses = 0;
         return seedPlan;
     }
@@ -3596,8 +3473,7 @@ function buildGenderAwareLayoutPlan(items, geometry) {
 }
 
 
-function reorderItemsForGenderCheckerboard(items, distribution) {
-    // Split only at category boundaries, retaining the real row intersections.
+function sortGenderCheckerboard(items, distribution) {
     if (!items.length || getItemPriority(items[0]) == getItemPriority(items[items.length - 1]))
         return reorderGenderPool(items, distribution);
     var result = [], start = 0, rowStart, i, end, counts;
@@ -3634,7 +3510,7 @@ function reorderGenderPool(items, distribution) {
     }
 
     improveGenderRowTokens(layout.rows);
-    centerMinorityGenderRows(layout.rows);
+    centerMinorityRows(layout.rows);
 
     for (r = 0; r < layout.rows.length; r++) {
         var tokens = layout.rows[r].tokens;
@@ -3652,9 +3528,6 @@ function reorderGenderPool(items, distribution) {
     return output;
 }
 
-// Improve actual adjacency after choosing row starts. This redistributes scarce
-// known genders and unknown separators instead of exhausting them in early rows.
-// Swaps keep counts intact; materialization below retains order within each pool.
 function improveGenderRowTokens(rows) {
     var tokens = [], rowOf = [], localOf = [], r, c, i, j;
     for (r = 0; r < rows.length; r++) {
@@ -3671,7 +3544,6 @@ function improveGenderRowTokens(rows) {
     }
     function delta(a, b) {
         var edges = [], k, left, out = 0;
-        // Only the horizontal edges incident to the two positions can change.
         var positions = [a - 1, a, b - 1, b];
         for (k = 0; k < positions.length; k++) {
             left = positions[k];
@@ -3681,12 +3553,10 @@ function improveGenderRowTokens(rows) {
         }
         return out;
     }
-    // Bounded local refinement: strict improvement prevents cycles. Row-start DP
-    // still supplies the initial global template and its vertical preference.
     for (var pass = 0; pass < 8; pass++) {
         var bestDelta = 0, bestA = -1, bestB = -1;
         for (i = 0; i < tokens.length; i++) {
-            if ((i % 32) == 0) progress(currentProgressValue);
+            if ((i % 32) == 0) progress(progressValue);
             for (j = i + 1; j < tokens.length; j++) {
                 if (tokens[i] == tokens[j]) continue;
                 var gain = delta(i, j);
@@ -3699,29 +3569,28 @@ function improveGenderRowTokens(rows) {
     for (i = 0; i < tokens.length; i++) rows[rowOf[i]].tokens[localOf[i]] = tokens[i];
 }
 
-function genderRowSymmetryPenalty(items) {
+function genderSymmetryPenalty(items) {
     var m = 0, f = 0, tokens = [], penalty = 0;
     for (var i = 0; i < items.length; i++) {
         var sex = typeof items[i] == 'string' ? items[i] : items[i].gender;
         tokens.push(sex); if (sex == 'M') m++; else if (sex == 'F') f++;
     }
-    // Balanced rows keep strict alternation, not a forced palindrome.
     if (!m || !f || Math.abs(m - f) <= 1) return 0;
     for (i = 0; i < Math.floor(tokens.length / 2); i++)
         if (tokens[i] != tokens[tokens.length - 1 - i]) penalty++;
     return penalty;
 }
 
-function getPlanGenderSymmetryPenalty(plan) {
+function planGenderSymmetry(plan) {
     var total = 0;
-    for (var r = 0; r < plan.rows.length; r++) total += genderRowSymmetryPenalty(plan.rows[r].items);
+    for (var r = 0; r < plan.rows.length; r++) total += genderSymmetryPenalty(plan.rows[r].items);
     return total;
 }
 
-function symmetricKnownGenderTokens(male, female) {
+function symmetricGenderTokens(male, female) {
     var n = male + female, small = Math.min(male, female), minority = male < female ? 'M' : 'F',
-        majority = oppositeGender(minority), memo = {}, cache = symmetricKnownGenderTokens.cache;
-    if (!cache) cache = symmetricKnownGenderTokens.cache = {};
+        majority = oppositeGender(minority), memo = {}, cache = symmetricGenderTokens.cache;
+    if (!cache) cache = symmetricGenderTokens.cache = {};
     var cacheKey = male + ':' + female;
     if (cache[cacheKey]) return cache[cacheKey].slice(0);
     function rec(depth, leftSmall, outerLeft, outerRight) {
@@ -3777,7 +3646,7 @@ function minorityCenterPenalty(rowItems, positions, commonScale) {
     return penalty;
 }
 
-function centerMinorityGenderRows(rows) {
+function centerMinorityRows(rows) {
     function horizontal(tokens) {
         var score = 0;
         for (var c = 1; c < tokens.length; c++)
@@ -3791,18 +3660,15 @@ function centerMinorityGenderRows(rows) {
         }
         if (!male || !female || Math.abs(male - female) <= 1) continue;
         if (!unknown) {
-            // Exact minimum repeats, then mirror symmetry, then centrality.
-            rows[r].tokens = symmetricKnownGenderTokens(male, female);
+            rows[r].tokens = symmetricGenderTokens(male, female);
             continue;
         }
-        // Unknowns remain neutral. Refine within the row without sacrificing
-        // its existing known-sex alternation, then prefer central minority slots.
         for (var pass = 0; pass < tokens.length; pass++) {
-            var h = horizontal(tokens), centerCost = minorityCenterPenalty(tokens), bestA = -1, bestB = -1, bestH = h, bestCenter = centerCost, bestSymmetry = genderRowSymmetryPenalty(tokens);
+            var h = horizontal(tokens), centerCost = minorityCenterPenalty(tokens), bestA = -1, bestB = -1, bestH = h, bestCenter = centerCost, bestSymmetry = genderSymmetryPenalty(tokens);
             for (var a = 0; a < tokens.length; a++) for (var b = a + 1; b < tokens.length; b++) {
                 if (tokens[a] == tokens[b]) continue;
                 var tmp = tokens[a]; tokens[a] = tokens[b]; tokens[b] = tmp;
-                var candidateH = horizontal(tokens), candidateCenter = minorityCenterPenalty(tokens), candidateSymmetry = genderRowSymmetryPenalty(tokens);
+                var candidateH = horizontal(tokens), candidateCenter = minorityCenterPenalty(tokens), candidateSymmetry = genderSymmetryPenalty(tokens);
                 tmp = tokens[a]; tokens[a] = tokens[b]; tokens[b] = tmp;
                 if (candidateH > bestH || (candidateH == bestH && (candidateSymmetry < bestSymmetry ||
                     (candidateSymmetry == bestSymmetry && candidateCenter < bestCenter - 1e-9)))) {
@@ -3815,9 +3681,7 @@ function centerMinorityGenderRows(rows) {
     }
 }
 
-// Exact row allocation for known M/F counts. Greedy consumption by a row-start
-// template can strand the other sex in later rows even though it can alternate.
-function solveKnownGenderAllocation(distribution, maleCount, femaleCount) {
+function solveGenderAllocation(distribution, maleCount, femaleCount) {
     var prefix = [0], memo = {}, r;
     for (r = 0; r < distribution.length; r++) prefix[r + 1] = prefix[r] + distribution[r];
     function rec(index, usedMale, previousStart) {
@@ -3830,11 +3694,11 @@ function solveKnownGenderAllocation(distribution, maleCount, femaleCount) {
             var f = len - m, starts = m == f ? ['M', 'F'] : [m > f ? 'M' : 'F'];
             for (var s = 0; s < starts.length; s++) {
                 var row = buildGenderRowFromPools(len, starts[s], m, f, 0), centered = [{ start: starts[s], tokens: row.tokens }];
-                centerMinorityGenderRows(centered);
+                centerMinorityRows(centered);
                 var next = rec(index + 1, usedMale + m, starts[s]);
                 if (!next || !next.ok) continue;
                 var bad = Math.max(0, Math.abs(m - f) - 1) + next.bad,
-                    symmetry = genderRowSymmetryPenalty(centered[0].tokens) + next.symmetry,
+                    symmetry = genderSymmetryPenalty(centered[0].tokens) + next.symmetry,
                     center = minorityCenterPenalty(centered[0].tokens) + next.center,
                     vertical = next.vertical + (previousStart && previousStart != starts[s] ? Math.min(distribution[index - 1], len) : 0),
                     candidate = { ok: true, bad: bad, symmetry: symmetry, center: center, vertical: vertical,
@@ -3851,15 +3715,12 @@ function solveKnownGenderAllocation(distribution, maleCount, femaleCount) {
 }
 
 function solveGenderRowTemplates(distribution, maleCount, femaleCount, unknownCount) {
-    if (!unknownCount) return solveKnownGenderAllocation(distribution, maleCount, femaleCount);
+    if (!unknownCount) return solveGenderAllocation(distribution, maleCount, femaleCount);
     var prefix = [0], i;
     for (i = 0; i < distribution.length; i++) prefix[i + 1] = prefix[i] + distribution[i];
     var total = prefix[distribution.length], memo = {};
 
     function scoreKey(stats) {
-        // Strong priority: horizontal alternation within rows.
-        // Softer priority: checkerboard alternation between neighbouring rows.
-        // Unknowns are better than forced wrong known-sex placements.
         return stats.horizontalGood * 1000 - stats.horizontalBad * 1000 +
             stats.rowMatched * 100 - stats.rowMismatched * 100 +
             stats.usedUnknown * 5 + stats.verticalGood * 10 - stats.verticalBad * 10;
@@ -3991,15 +3852,15 @@ function oppositeGender(sex) {
     return sex == 'M' ? 'F' : 'M';
 }
 
-function getPlanMinorityCenterPenalty(plan) {
+function planMinorityPenalty(plan) {
     var penalty = 0, positions = {};
     for (var i = 0; plan.placements && i < plan.placements.length; i++) positions[String(plan.placements[i].layerId)] = plan.placements[i].targetCenterX;
     for (var r = 0; r < plan.rows.length; r++) penalty += minorityCenterPenalty(plan.rows[r].items, plan.placements ? positions : null, plan.commonScale);
     return penalty;
 }
 
-function getGenderCheckerboardStats(plan) {
-    var result = evaluateGenderRowsForStats(plan && plan.rows ? plan.rows : []),
+function genderStats(plan) {
+    var result = evaluateGenderRows(plan && plan.rows ? plan.rows : []),
         known = result.known,
         matched = result.matched,
         mismatched = result.mismatched,
@@ -4013,8 +3874,8 @@ function getGenderCheckerboardStats(plan) {
         unknown: unknown,
         verticalKnown: verticalKnown,
         verticalGood: verticalGood,
-        symmetryPenalty: getPlanGenderSymmetryPenalty(plan),
-        minorityCenterPenalty: getPlanMinorityCenterPenalty(plan),
+        symmetryPenalty: planGenderSymmetry(plan),
+        minorityCenterPenalty: planMinorityPenalty(plan),
         horizontalGood: result.horizontalGood,
         horizontalBad: result.horizontalBad,
         rowStarts: result.rowStarts,
@@ -4023,7 +3884,7 @@ function getGenderCheckerboardStats(plan) {
     };
 }
 
-function evaluateGenderRowsForStats(rows) {
+function evaluateGenderRows(rows) {
     var memo = {}, distribution = [], r;
     for (r = 0; r < rows.length; r++) distribution.push((rows[r].items || []).length);
 
@@ -4114,11 +3975,11 @@ function evaluateGenderRowsForStats(rows) {
 
 function isBetterGenderPlan(candidate, current) {
     if (cfg.rowRhythm != 'auto') {
-        var shapeOrder = compareVerticalRowScores(getVerticalRowScore(candidate.distribution, cfg.rowRhythm), getVerticalRowScore(current.distribution, cfg.rowRhythm));
+        var shapeOrder = compareRowScores(getVerticalRowScore(candidate.distribution, cfg.rowRhythm), getVerticalRowScore(current.distribution, cfg.rowRhythm));
         if (shapeOrder) return shapeOrder < 0;
     }
-    var a = candidate.genderCheckerboard || getGenderCheckerboardStats(candidate),
-        b = current.genderCheckerboard || getGenderCheckerboardStats(current),
+    var a = candidate.genderCheckerboard || genderStats(candidate),
+        b = current.genderCheckerboard || genderStats(current),
         eps = 0.000001;
     var ah = a.horizontalGood - a.horizontalBad, bh = b.horizontalGood - b.horizontalBad;
     if (a.horizontalBad < b.horizontalBad) return true;
@@ -4150,26 +4011,23 @@ function arraysEqual(a, b) {
 }
 
 function buildLayoutPlan(items, geometry) {
-    return refineVerticalLayout(buildGeometricLayoutPlan(items, geometry), geometry);
+    return refineVerticalLayout(buildGeometryLayout(items, geometry), geometry);
 }
 
-function buildGeometricLayoutPlan(items, geometry) {
-    if (lockedLayoutActive()) return buildLockedLayoutPlan(items, geometry);
+function buildGeometryLayout(items, geometry) {
+    if (fixedLayoutActive()) return buildFixedLayout(items, geometry);
     var medianHeight = getMedianHeight(items),
         baseGapX = medianHeight * cfg.gapX / 100,
         baseGapY = medianHeight * cfg.gapY / 100;
 
-    // Rectangular selections keep the original fast deterministic solver.
-    // One-contour shapes with one interval per band use the fast band solver.
-    // Disconnected areas, holes and parallel intervals use the multi-zone DP.
     if (geometry.multiZone) {
         var accelerated = tryPythonZoneLayout(items, geometry, baseGapX, baseGapY);
         if (accelerated) return accelerated;
         progress(32, 'Distributing across zones...')
-        var multi = buildMultiZoneLayoutFast(items, geometry, baseGapX, baseGapY);
+        var multi = buildMultiZoneLayout(items, geometry, baseGapX, baseGapY);
         if (!multi) throw new Error(str.t('Не удалось распределить слои по отдельным площадкам выделения.', 'Could not distribute layers across the separate selection zones.'))
         multi.autoRows = cfg.autoRows
-        if (cfg.pythonPacking && !alphabetOrderActive()) multi.packingFallbackReason = packingFallbackReason;
+        if (cfg.pythonPacking && !alphabetOrderActive()) multi.packingFallbackReason = packingError;
         return multi
     }
 
@@ -4191,7 +4049,7 @@ function buildGeometricLayoutPlan(items, geometry) {
         progress(32 + 23 * (tested / Math.max(1, candidates)), 'Checked ' + tested + '/' + candidates + '; ' + rowsCount + ' rows')
 
         var distribution = getBalancedDistribution(items.length, rowsCount),
-            candidate = buildRectangularLayoutCandidate(items, geometry, distribution, baseGapX, baseGapY);
+            candidate = buildRectLayout(items, geometry, distribution, baseGapX, baseGapY);
 
         if (!best || isBetterLayout(candidate, best)) best = candidate
         tested++
@@ -4207,7 +4065,7 @@ function buildGeometricLayoutPlan(items, geometry) {
     return best
 }
 
-function buildRectangularLayoutCandidate(items, geometry, distribution, baseGapX, baseGapY) {
+function buildRectLayout(items, geometry, distribution, baseGapX, baseGapY) {
     var rowSpecs = [],
         index = 0,
         maxMinRowWidth = 0,
@@ -4268,8 +4126,8 @@ function resolveVerticalLayout(rowSpecs, groups, commonScale, baseGapY) {
 
         hasAdjacentRows = true;
         var limits = group.type == 'ranges' ?
-            getRangeVerticalGapBounds(rowSpecs, indices, commonScale) :
-            getContainerVerticalGapBounds(rowSpecs, indices, commonScale, group.top, group.bottom);
+            getRangeGapBounds(rowSpecs, indices, commonScale) :
+            getGroupGapBounds(rowSpecs, indices, commonScale, group.top, group.bottom);
 
         if (!limits) return null;
         if (limits.min > gapMin) gapMin = limits.min;
@@ -4290,7 +4148,7 @@ function resolveVerticalLayout(rowSpecs, groups, commonScale, baseGapY) {
 
         var placed = group.type == 'ranges' ?
             placeRangeVerticalGroup(rowSpecs, indices, commonScale, actualGapY, group.top, group.bottom) :
-            placeContainerVerticalGroup(rowSpecs, indices, commonScale, actualGapY, group.top, group.bottom);
+            placeVerticalGroup(rowSpecs, indices, commonScale, actualGapY, group.top, group.bottom);
         if (!placed) return null;
     }
 
@@ -4311,7 +4169,7 @@ function resolveVerticalLayout(rowSpecs, groups, commonScale, baseGapY) {
     };
 }
 
-function getContainerVerticalGapBounds(rowSpecs, indices, commonScale, top, bottom) {
+function getGroupGapBounds(rowSpecs, indices, commonScale, top, bottom) {
     var available = bottom - top,
         rowsHeight = 0;
     for (var i = 0; i < indices.length; i++)
@@ -4322,7 +4180,7 @@ function getContainerVerticalGapBounds(rowSpecs, indices, commonScale, top, bott
     return { min: 0, max: (available - rowsHeight) / (indices.length - 1) };
 }
 
-function getRangeVerticalGapBounds(rowSpecs, indices, commonScale) {
+function getRangeGapBounds(rowSpecs, indices, commonScale) {
     if (indices.length <= 1) return { min: 0, max: 1e100 };
 
     var cumulative = [0],
@@ -4356,7 +4214,7 @@ function getRangeVerticalGapBounds(rowSpecs, indices, commonScale) {
     return { min: gapMin, max: gapMax };
 }
 
-function placeContainerVerticalGroup(rowSpecs, indices, commonScale, gapY, top, bottom) {
+function placeVerticalGroup(rowSpecs, indices, commonScale, gapY, top, bottom) {
     var rowsHeight = 0,
         i;
     for (i = 0; i < indices.length; i++)
@@ -4417,12 +4275,12 @@ function placeRangeVerticalGroup(rowSpecs, indices, commonScale, gapY, top, bott
 function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGapY, metadata, fixedGapPolicy) {
     if (!rowSpecs || !rowSpecs.length) return null;
 
-    if (lockedLayoutActive()) {
-        if (Math.abs(commonScale - lockedRuntimeScale()) > 1e-9) throw new Error(str.t('Изменился масштаб, зафиксированный в экшене.', 'The scale locked in the action has changed.'));
-        fixedGapPolicy = lockedGapPolicy(rowSpecs, actionLayoutProfile);
+    if (fixedLayoutActive()) {
+        if (Math.abs(commonScale - getFixedRuntimeScale()) > 1e-9) throw new Error(str.t('Изменился масштаб, зафиксированный в экшене.', 'The scale locked in the action has changed.'));
+        fixedGapPolicy = getFixedGaps(rowSpecs, actionProfile);
         if (!fixedGapPolicy) return null;
     }
-    var gapPolicy = fixedGapPolicy || resolveHorizontalGapPolicy(rowSpecs, commonScale, baseGapX);
+    var gapPolicy = fixedGapPolicy || getHorizontalGaps(rowSpecs, commonScale, baseGapX);
     if (!gapPolicy) return null;
 
     var blockWidths = {}, rowWidths = [];
@@ -4529,7 +4387,7 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
     return plan;
 }
 
-function resolveHorizontalGapPolicy(rowSpecs, commonScale, baseGapX) {
+function getHorizontalGaps(rowSpecs, commonScale, baseGapX) {
     var minFinalGapX = baseGapX * commonScale,
         maxFinalGapX = minFinalGapX * cfg.maxGapMultiplier,
         maxUniformGapX = 1e100,
@@ -4551,14 +4409,11 @@ function resolveHorizontalGapPolicy(rowSpecs, commonScale, baseGapX) {
         if (gapLimit < minFinalGapX - FIT_EPS) return null;
 
         if (cfg.horizontalAlign == 'justify') {
-            // Justify is intentionally per physical row: every row independently
-            // reaches both edges of its own available interval.
             var rowGap = Math.max(minFinalGapX, gapLimit);
             byRow[String(r)] = rowGap;
             if (actualGapXMin == null || rowGap < actualGapXMin) actualGapXMin = rowGap;
             if (actualGapXMax == null || rowGap > actualGapXMax) actualGapXMax = rowGap;
         } else if (gapLimit < maxUniformGapX) {
-            // Left / Center / Right always share one global X gap.
             maxUniformGapX = gapLimit;
         }
         hasGap = true;
@@ -4593,7 +4448,6 @@ function getHorizontalGapForRow(policy, count, rowIndex) {
 }
 
 function horizontalBlockKey(spec) {
-    // Never center across distinct zones or across different safe spans of a cut-out.
     return String(spec.componentIndex == undefined ? '' : spec.componentIndex) + '|' +
         String(spec.zoneIndex == undefined ? '' : spec.zoneIndex) + '|' + spec.interval.left + '|' + spec.interval.right;
 }
@@ -4603,17 +4457,13 @@ function alignRowLeft(interval, rowWidth, count, blockWidth) {
         freeX = intervalWidth - rowWidth;
     if (freeX < -FIT_EPS) return null;
 
-    // Gap policy already used the largest common legal gap. Any slack left
-    // around the widest row cannot be filled without changing scale/gaps.
     var blockSlack = Math.max(0, intervalWidth - (blockWidth == undefined ? rowWidth : blockWidth)),
         inset = blockSlack / 2;
     switch (cfg.horizontalAlign) {
         case 'left': return interval.left + inset;
         case 'right': return interval.right - inset - rowWidth;
         case 'justify':
-            // With 2+ photos Justify is a hard invariant: the row reaches both edges.
-            // A one-photo row has no inter-photo gap to stretch and is centered.
-            if (count <= 1 || lockedLayoutActive()) return interval.left + freeX / 2;
+            if (count <= 1 || fixedLayoutActive()) return interval.left + freeX / 2;
             return Math.abs(freeX) <= FIT_EPS ? interval.left : null;
         default:
             return interval.left + freeX / 2;
@@ -4653,8 +4503,8 @@ function markComponentSignature(signature, index) {
     return signature.substring(0, index) + '1' + signature.substring(index + 1);
 }
 
-function compositionSearchRequested(items) {
-    if (!cfg.pythonPacking || alphabetOrderActive() || lockedLayoutActive()) return false;
+function compositionRequested(items) {
+    if (!cfg.pythonPacking || alphabetOrderActive() || fixedLayoutActive()) return false;
     var palettes = 0;
     for (var i = 0; i < items.length; i++) {
         if (normalizeColorMode(cfg.colorMode) != 'off' && items[i].colorPalette) palettes++;
@@ -4664,7 +4514,7 @@ function compositionSearchRequested(items) {
     return palettes >= 2;
 }
 
-function getCompositionRowQuality(plan) {
+function compositionQuality(plan) {
     var groups = {}, counts = [], singles = 0, excess = 0, imbalance = 0, r, key;
     for (r = 0; r < plan.rows.length; r++) {
         var row = plan.rows[r], count = row.items.length;
@@ -4688,7 +4538,7 @@ function getCompositionRowQuality(plan) {
 }
 
 function compareCompositionRows(a, b) {
-    var qa = getCompositionRowQuality(a), qb = getCompositionRowQuality(b);
+    var qa = compositionQuality(a), qb = compositionQuality(b);
     for (var i = 0; i < qa.length; i++) {
         if (qa[i] < qb[i] - 1e-8) return -1;
         if (qa[i] > qb[i] + 1e-8) return 1;
@@ -4696,8 +4546,8 @@ function compareCompositionRows(a, b) {
     return 0;
 }
 
-function optimizeCompositionAssignment(plan, geometry, useGender, useHead, useColor) {
-    if (!plan.pythonComposition) return optimizeSemanticAssignment(plan, geometry, useGender, useHead);
+function optimizeComposition(plan, geometry, useGender, useHead, useColor) {
+    if (!plan.pythonComposition) return optimizeSemantics(plan, geometry, useGender, useHead);
     if (useColor == undefined) useColor = normalizeColorMode(cfg.colorMode) != 'off';
     var candidates = [plan], best = null, bestScore = null, bestColor = 0, distances = {},
         reference = plan.compositionReferenceScale;
@@ -4706,23 +4556,20 @@ function optimizeCompositionAssignment(plan, geometry, useGender, useHead, useCo
     for (var i = 0; i < candidates.length; i++) reference = Math.max(reference, candidates[i].commonScale, candidates[i].verticalReferenceScale || 0);
     for (i = 0; i < candidates.length; i++) {
         if (candidates[i].commonScale < reference * (1 - COMPOSITION_MAX_SCALE_LOSS) - 1e-9) continue;
-        setLayoutProgressRange(i / candidates.length, 1 / candidates.length);
-        var candidate = useGender || useHead ? optimizeSemanticAssignment(candidates[i], geometry, useGender, useHead) : candidates[i],
-            score = getSemanticAssignmentScore(candidate, geometry, useGender, useHead), colorCost = 0;
+        setProgressRange(i / candidates.length, 1 / candidates.length);
+        var candidate = useGender || useHead ? optimizeSemantics(candidates[i], geometry, useGender, useHead) : candidates[i],
+            score = semanticScore(candidate, geometry, useGender, useHead), colorCost = 0;
         if (useColor) {
             var colored = optimizeColorAssignment(candidate, geometry, useGender, useHead, cfg.colorMode),
-                coloredScore = getSemanticAssignmentScore(colored, geometry, useGender, useHead);
-            // Joint search has strict priorities: colour cannot spend a better
-            // gender or pose score. Keep the original if legacy colour refinement
-            // used its bounded pose concession.
-            if (!betterSemanticAssignment(score, coloredScore, useHead)) {
+                coloredScore = semanticScore(colored, geometry, useGender, useHead);
+            if (!betterSemantic(score, coloredScore, useHead)) {
                 candidate = colored; score = coloredScore;
             }
             colorCost = colorAssignmentCost(candidate, cfg.colorMode, distances);
         }
-        var sameSemantics = best && !betterSemanticAssignment(score, bestScore, useHead) && !betterSemanticAssignment(bestScore, score, useHead);
+        var sameSemantics = best && !betterSemantic(score, bestScore, useHead) && !betterSemantic(bestScore, score, useHead);
         var rowOrder = best ? compareCompositionRows(candidate, best) : -1;
-        if (!best || rowOrder < 0 || (rowOrder == 0 && (betterSemanticAssignment(score, bestScore, useHead) || (sameSemantics &&
+        if (!best || rowOrder < 0 || (rowOrder == 0 && (betterSemantic(score, bestScore, useHead) || (sameSemantics &&
             (colorCost < bestColor - 1e-8 || (Math.abs(colorCost - bestColor) <= 1e-8 && candidate.commonScale > best.commonScale + 1e-9)))))) {
             best = candidate; bestScore = score; bestColor = colorCost;
         }
@@ -4738,15 +4585,15 @@ function optimizeCompositionAssignment(plan, geometry, useGender, useHead, useCo
 }
 
 function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
-    if (alphabetOrderActive() || !cfg.pythonPacking || packingDisabledForRun || lockedLayoutActive()) return null;
-    var init = pythonApi.tryInit();
+    if (alphabetOrderActive() || !cfg.pythonPacking || packingDisabled || fixedLayoutActive()) return null;
+    var init = py.tryInit();
     if (!init || !init.ok) {
-        packingDisabledForRun = true;
-        packingFallbackReason = init && init.message ? init.message : str.t('Python недоступен.', 'Python is unavailable.');
+        packingDisabled = true;
+        packingError = init && init.message ? init.message : str.t('Python недоступен.', 'Python is unavailable.');
         return null;
     }
     try {
-        var zones, composition = compositionSearchRequested(items), data = [], zoneData = [], i;
+        var zones, composition = compositionRequested(items), data = [], zoneData = [], i;
         if (geometry.isRectangle) zones = [{ left: geometry.bounds.left, top: geometry.bounds.top,
             right: geometry.bounds.right, bottom: geometry.bounds.bottom, componentIndex: 0 }];
         else {
@@ -4767,7 +4614,7 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
         for (i = 0; i < zones.length; i++) zoneData.push({ left: zones[i].left, top: zones[i].top,
             right: zones[i].right, bottom: zones[i].bottom, componentIndex: zones[i].componentIndex });
         progress(32, composition ? 'Python: searching whole-sheet composition...' : 'Python: searching zone packing...');
-        beginPythonProgressWait(1, composition ? 14000 : 8000);
+        beginPythonWait(1, composition ? 14000 : 8000);
         var payload = { items: data, zones: zoneData,
             baseGapX: baseGapX, baseGapY: baseGapY, maxGapMultiplier: cfg.maxGapMultiplier,
             horizontalAlign: cfg.horizontalAlign, rowRhythm: cfg.rowRhythm,
@@ -4784,7 +4631,7 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
                 }
             }
         }
-        var answer = pythonApi.sendPayload(composition ? 'layout_composition' : 'layout_zones', payload, { longRequest: true }),
+        var answer = py.sendPayload(composition ? 'layout_composition' : 'layout_zones', payload, { longRequest: true }),
             plan = decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGapY);
         if (composition) {
             if (answer.compositionSearch !== true || typeof answer.referenceScale != 'number' || !isFinite(answer.referenceScale) ||
@@ -4796,8 +4643,6 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
             plan.compositionEvaluated = answer.compositionEvaluated;
             plan.compositionGeometryBaseline = decodePythonZoneLayout(answer.geometryBaseline, items, geometry, zones, baseGapX, baseGapY);
             if (seedPlan) {
-                // A decomposed shape may fit less tightly than the original JSX
-                // band solver. Always keep the original valid geometry eligible.
                 plan.compositionJSXBaseline = seedPlan;
                 plan.compositionReferenceScale = Math.max(plan.compositionReferenceScale, seedPlan.commonScale, seedPlan.verticalReferenceScale || 0);
             }
@@ -4806,10 +4651,10 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
         return plan;
     } catch (e) {
         if (e.number == 8007) throw e;
-        packingDisabledForRun = true;
-        packingFallbackReason = e.message ? e.message : String(e);
+        packingDisabled = true;
+        packingError = e.message ? e.message : String(e);
         return null;
-    } finally { endPythonProgressWait(); }
+    } finally { endPythonWait(); }
 }
 
 function decodePythonZoneLayout(answer, items, geometry, zones, baseGapX, baseGapY) {
@@ -4895,7 +4740,7 @@ function balanceZoneRows(specs, indices, zone, scale, baseGapX, baseGapY, profil
     for (r = 0; r < indices.length; r++) items = items.concat(specs[indices[r]].items);
     var n = items.length, rows = indices.length;
     if (rows <= 1 || n <= rows) return;
-    var metrics = buildFastShapeSegmentCache(items), limitW = (zone.right - zone.left) / scale,
+    var metrics = getShapeSegments(items), limitW = (zone.right - zone.left) / scale,
         limitH = (zone.bottom - zone.top) / scale - baseGapY * (rows - 1),
         center = (rows - 1) / 2 - 0.1, states = { '0': [{ height: 0, score: [0, 0, 0, 0], counts: [] }] };
     if (!profile) profile = getRowRhythmProfile(rows, cfg.rowRhythm);
@@ -4903,15 +4748,13 @@ function balanceZoneRows(specs, indices, zone, scale, baseGapX, baseGapY, profil
         for (var k = 0; k < a.length; k++) if (Math.abs(a[k] - b[k]) > 1e-8) return a[k] < b[k] ? -1 : 1;
         return 0;
     }
-    // Keep the Pareto frontier of required height and additive balance score.
-    // A shorter but uneven split must not hide a slightly taller feasible one.
     function add(frontier, candidate) {
         for (var k = 0; k < frontier.length; k++) if (frontier[k].height <= candidate.height + 1e-9 && compare(frontier[k].score, candidate.score) <= 0) return;
         for (k = frontier.length - 1; k >= 0; k--) if (candidate.height <= frontier[k].height + 1e-9 && compare(candidate.score, frontier[k].score) <= 0) frontier.splice(k, 1);
         frontier.push(candidate);
     }
     for (r = 0; r < rows; r++) {
-        progress(currentProgressValue, 'Balancing row fill...');
+        progress(progressValue, 'Balancing row fill...');
         var next = {};
         for (var consumedKey in states) if (states.hasOwnProperty(consumedKey)) {
             var consumed = Number(consumedKey), frontier = states[consumedKey], maximum = n - consumed - (rows - r - 1);
@@ -4945,9 +4788,9 @@ function balanceZoneRows(specs, indices, zone, scale, baseGapX, baseGapY, profil
     }
 }
 
-function buildMultiZoneLayoutFast(items, geometry, baseGapX, baseGapY) {
+function buildMultiZoneLayout(items, geometry, baseGapX, baseGapY) {
     var zones = flattenComponentZones(geometry.components),
-        cache = buildFastShapeSegmentCache(items),
+        cache = getShapeSegments(items),
         maxIntervalWidth = getMaximumIntervalWidth(geometry),
         maxZoneHeight = 0,
         maxItemWidth = 0,
@@ -5092,8 +4935,6 @@ function findMultiZoneAllocation(items, zones, scale, baseGapX, baseGapY, cache,
 
             if (requireAllComponents && maxItems < componentCount - state.usedComponentCount) continue;
 
-            // Capacity is based on the real contiguous photos that remain at this
-            // exact scale. No median-size or area approximation is used here.
             var capacities = [],
                 totalCapacity = 0;
             for (var rz = z; rz < zones.length; rz++) {
@@ -5140,7 +4981,7 @@ function findMultiZoneAllocation(items, zones, scale, baseGapX, baseGapY, cache,
 
                 if (requireAllComponents && itemsAfter < componentCount - newUsedComponentCount) continue;
 
-                var optionDistribution = getPackingRowsDistribution(option.rows),
+                var optionDistribution = packingRows(option.rows),
                     combinedDistribution = state.distribution.concat(optionDistribution);
 
                 addMultiZoneState(next, {
@@ -5223,8 +5064,6 @@ function buildZonePackingOptions(start, maxItems, zone, scale, minGapX, minGapY,
                     rowGapX = minGapX,
                     rowWidth = metrics.contentWidth * scale + Math.max(0, count - 1) * rowGapX;
 
-                // Capacity is checked at the minimum allowed gap. In Justify the
-                // final gap is recomputed later so the accepted row reaches both edges.
                 if (rowWidth > zone.width + 1e-9) break;
 
                 var rowHeight = metrics.rowHeight * scale,
@@ -5238,8 +5077,8 @@ function buildZonePackingOptions(start, maxItems, zone, scale, minGapX, minGapY,
 
                 if (!dp[nextConsumed]) dp[nextConsumed] = []
                 var oldCandidate = dp[nextConsumed][nextRows],
-                    candidateRhythm = getRowRhythmPenalty(getPackingRowsDistribution(candidate.rows), cfg.rowRhythm),
-                    oldCandidateRhythm = oldCandidate ? getRowRhythmPenalty(getPackingRowsDistribution(oldCandidate.rows), cfg.rowRhythm) : 1e100;
+                    candidateRhythm = getRowRhythmPenalty(packingRows(candidate.rows), cfg.rowRhythm),
+                    oldCandidateRhythm = oldCandidate ? getRowRhythmPenalty(packingRows(oldCandidate.rows), cfg.rowRhythm) : 1e100;
                 if (!oldCandidate || candidate.height < oldCandidate.height - FIT_EPS ||
                     (cfg.rowRhythm != 'auto' && Math.abs(candidate.height - oldCandidate.height) <= FIT_EPS && candidateRhythm < oldCandidateRhythm - 0.000001))
                     dp[nextConsumed][nextRows] = candidate
@@ -5255,7 +5094,6 @@ function buildZonePackingOptions(start, maxItems, zone, scale, minGapX, minGapY,
         }
     }
 
-    // Larger allocations first usually reach a complete document state sooner.
     options.sort(function (a, b) {
         if (a.count != b.count) return b.count - a.count
         return a.rows.length - b.rows.length
@@ -5295,7 +5133,7 @@ function zoneAllocationPenalty(count, target) {
 }
 
 function buildShapedLayoutFast(items, geometry, baseGapX, baseGapY) {
-    var cache = buildFastShapeSegmentCache(items),
+    var cache = getShapeSegments(items),
         maxIntervalWidth = getMaximumIntervalWidth(geometry),
         maxItemWidth = 0,
         maxItemHeight = 0,
@@ -5374,7 +5212,7 @@ function buildShapedLayoutFast(items, geometry, baseGapX, baseGapY) {
     });
 }
 
-function buildFastShapeSegmentCache(items) {
+function getShapeSegments(items) {
     var n = items.length,
         segments = [],
         start, count;
@@ -5470,10 +5308,6 @@ function findShapedPlacementFast(items, geometry, scale, baseGapX, baseGapY, cac
 
                     if (desiredRows && (rowsAfter < 0 || itemsAfter < rowsAfter || (rowsAfter == 0 && itemsAfter != 0))) continue;
 
-                    // Feasibility is checked with one exact minimum Gap Y for
-                    // every row. This guarantees that the selected path always
-                    // has a document-wide uniform vertical rhythm. After the
-                    // scale is fixed we may enlarge that one common gap.
                     var topMin = Math.max(range.topMin, prev.bottomMin + minGapY),
                         topMax = Math.min(range.topMax, prev.bottomMax + minGapY);
 
@@ -5533,10 +5367,6 @@ function findShapedPlacementFast(items, geometry, scale, baseGapX, baseGapY, cac
 }
 
 function addFastShapeState(list, state, desiredRows) {
-    // For the future only the reachable bottom interval and row count matter.
-    // If another state covering the same prefix has an equal/better row count
-    // and fully contains this interval, this state can never unlock anything
-    // new and is discarded. This keeps the DP compact in ExtendScript.
     for (var i = list.length - 1; i >= 0; i--) {
         var old = list[i],
             oldDominates = old.bottomMin <= state.bottomMin + FIT_EPS && old.bottomMax >= state.bottomMax - FIT_EPS,
@@ -5585,7 +5415,7 @@ function getFastRowTopRanges(geometry, rowHeight, requiredWidth) {
     events.sort(function (a, b) { return a - b })
 
     if (events.length == 1) {
-        var onlyIntervals = getIntervalsForVerticalSpan(geometry, low, low + rowHeight),
+        var onlyIntervals = getVerticalIntervals(geometry, low, low + rowHeight),
             only = chooseRowInterval(onlyIntervals, requiredWidth);
         if (only) ranges.push({ topMin: low, topMax: low, interval: only })
         return ranges
@@ -5597,7 +5427,7 @@ function getFastRowTopRanges(geometry, rowHeight, requiredWidth) {
         if (to < from + 0.000001) continue;
 
         var probe = from + (to - from) / 2,
-            intervals = getIntervalsForVerticalSpan(geometry, probe, probe + rowHeight),
+            intervals = getVerticalIntervals(geometry, probe, probe + rowHeight),
             interval = chooseRowInterval(intervals, requiredWidth);
 
         if (!interval) continue;
@@ -5651,8 +5481,6 @@ function isBetterLayout(candidate, current) {
     if (candidate.commonScale > current.commonScale + scaleEps) return true
     if (candidate.commonScale < current.commonScale - scaleEps) return false
 
-    // At the same scale, honor the selected vertical row rhythm before
-    // secondary geometric tie-breakers. Rhythm never wins by shrinking scale.
     if (cfg.rowRhythm != 'auto') {
         var candidateRhythm = candidate.rhythmPenalty != undefined ? candidate.rhythmPenalty : getRowRhythmPenalty(candidate.distribution, cfg.rowRhythm),
             currentRhythm = current.rhythmPenalty != undefined ? current.rhythmPenalty : getRowRhythmPenalty(current.distribution, cfg.rowRhythm);
@@ -5660,17 +5488,13 @@ function isBetterLayout(candidate, current) {
         if (candidateRhythm > currentRhythm + 0.000001) return false
     }
 
-    // If two variants have effectively the same scale, prefer the one where
-    // width and height constraints are balanced more closely. This avoids a
-    // needlessly long/thin layout when it gives no size advantage.
     if (candidate.fitDifference < current.fitDifference - scaleEps) return true
     if (candidate.fitDifference > current.fitDifference + scaleEps) return false
 
-    // Final deterministic tie-breaker: fewer rows.
     return candidate.rows.length < current.rows.length
 }
 
-function compareVerticalRowScores(a, b) {
+function compareRowScores(a, b) {
     for (var i = 0; i < Math.max(a.length, b.length); i++) {
         var av = a[i] || 0, bv = b[i] || 0;
         if (av < bv - 1e-8) return -1;
@@ -5719,7 +5543,7 @@ function improveVerticalCounts(counts, mode, feasible, tick) {
             if (a == b) continue;
             var trial = best.slice(0); trial[a]--; trial[b]++;
             var quality = getVerticalRowScore(trial, mode);
-            if (compareVerticalRowScores(quality, nextScore) < 0 && (!feasible || feasible(trial))) {
+            if (compareRowScores(quality, nextScore) < 0 && (!feasible || feasible(trial))) {
                 next = trial; nextScore = quality;
             }
         }
@@ -5760,7 +5584,7 @@ function reflowVerticalRows(plan, geometry, itemRows, scale) {
 function refineVerticalLayout(plan, geometry) {
     if (!plan || cfg.rowRhythm == 'auto' || plan.pythonPacking || plan.rows.length <= 1) return plan;
     var initial = plan.distribution, reference = plan.commonScale, fixed = !!plan.lockedMetrics,
-        minimum = fixed ? reference : reference * (1 - (typeof COMPOSITION_MAX_SCALE_LOSS != 'undefined' ? COMPOSITION_MAX_SCALE_LOSS : .01)),
+        minimum = fixed ? reference : reference * (1 - COMPOSITION_MAX_SCALE_LOSS),
         seed = {}, rows = plan.rows, groups = {}, i;
     for (var property in plan) if (plan.hasOwnProperty(property)) seed[property] = plan[property];
     seed.commonScale = minimum;
@@ -5784,15 +5608,15 @@ function refineVerticalLayout(plan, geometry) {
     }
     var total = 0;
     for (i = 0; i < initial.length; i++) total += initial[i];
-    var preferred = getPreferredRowDistribution(total, initial.length, cfg.rowRhythm), start = initial;
-    if (compareVerticalRowScores(getVerticalRowScore(preferred, cfg.rowRhythm), getVerticalRowScore(initial, cfg.rowRhythm)) < 0 && rebuild(preferred, minimum)) start = preferred;
+    var preferred = preferredRows(total, initial.length, cfg.rowRhythm), start = initial;
+    if (compareRowScores(getVerticalRowScore(preferred, cfg.rowRhythm), getVerticalRowScore(initial, cfg.rowRhythm)) < 0 && rebuild(preferred, minimum)) start = preferred;
     var bestPlan = null,
         result = improveVerticalCounts(start, cfg.rowRhythm, function (counts) {
             var candidate = rebuild(counts, minimum);
             if (!candidate) return false;
             bestPlan = candidate; return true;
-        }, function () { progress(currentProgressValue, 'Refining vertical row shape...'); });
-    if (compareVerticalRowScores(getVerticalRowScore(result, cfg.rowRhythm), getVerticalRowScore(initial, cfg.rowRhythm)) >= 0) return plan;
+        }, function () { progress(progressValue, 'Refining vertical row shape...'); });
+    if (compareRowScores(getVerticalRowScore(result, cfg.rowRhythm), getVerticalRowScore(initial, cfg.rowRhythm)) >= 0) return plan;
     bestPlan = rebuild(result, minimum);
     if (!bestPlan) return plan;
     var high = reference, low = minimum, exact = rebuild(result, high);
@@ -5806,7 +5630,7 @@ function refineVerticalLayout(plan, geometry) {
     return bestPlan;
 }
 
-function getPreferredRowDistribution(count, rows, mode) {
+function preferredRows(count, rows, mode) {
     if (mode == 'auto') return getBalancedDistribution(count, rows);
 
     var base = Math.floor(count / rows),
@@ -5824,8 +5648,6 @@ function getPreferredRowDistribution(count, rows, mode) {
 
     ranked.sort(function (a, b) {
         if (Math.abs(a.score - b.score) > 0.000001) return b.score - a.score;
-        // Deterministic tie-breaker: reading order. Symmetric modes normally
-        // select both members of a pair when the arithmetic allows it.
         return a.index - b.index;
     });
 
@@ -5843,8 +5665,6 @@ function getRowRhythmProfile(rows, mode) {
 
     if (mode == 'alternateWide' || mode == 'alternateNarrow') {
         var wideOnEven = mode == 'alternateWide', bias = 1 / (4 * rows * rows);
-        // Resolve unavoidable remainder ties in reading order: fill preferred
-        // long rows from the top, and put extra items in short rows from below.
         for (i = 0; i < rows; i++) out[i] = ((i % 2 == 0) == wideOnEven) ? 1 - i * bias : i * bias;
         return out;
     }
@@ -5887,7 +5707,7 @@ function getRowRhythmPenalty(distribution, mode) {
     return penalty / distribution.length;
 }
 
-function getPackingRowsDistribution(rows) {
+function packingRows(rows) {
     var out = [];
     if (!rows) return out;
     for (var i = 0; i < rows.length; i++) out.push(rows[i].count);
@@ -5928,8 +5748,6 @@ function getSymmetricExtraRows(rows, extra) {
         })
     }
 
-    // When the remainder is even, start near the center. When it is odd and the
-    // center is already occupied, spread the next pair towards the outside.
     pairs.sort(function (a, b) {
         if (selected.length) return a.distance < b.distance ? 1 : -1
         return a.distance > b.distance ? 1 : -1
@@ -5941,7 +5759,6 @@ function getSymmetricExtraRows(rows, extra) {
         extra -= 2
     }
 
-    // This branch is mainly for an even number of rows.
     if (extra == 1) {
         var best = -1,
             bestDistance = 1e20;
@@ -5981,17 +5798,17 @@ function validateLayoutPlan(plan, geometry) {
     if (!isFinite(plan.commonScale) || plan.commonScale <= 0)
         throw new Error(str.t('Некорректный общий масштаб.', 'Invalid common scale.'))
 
-    if (plan.lockedMetrics && lockedLayoutActive()) {
+    if (plan.lockedMetrics && fixedLayoutActive()) {
         var previousRows = {};
         for (var r = 0; r < plan.rows.length; r++) {
             var row = plan.rows[r], zoneKey = String(row.zoneIndex == undefined ? 0 : row.zoneIndex), previous = previousRows[zoneKey];
-            if (previous && Math.abs(row.y - previous.y - previous.rowHeight * plan.commonScale - actionLayoutProfile.gapY) > 1e-7)
+            if (previous && Math.abs(row.y - previous.y - previous.rowHeight * plan.commonScale - actionProfile.gapY) > 1e-7)
                 throw new Error(str.t('Изменился Y-интервал экшена.', 'The action Y gap has changed.'));
             previousRows[zoneKey] = row;
-            if (row.items.length > 1 && Math.abs(row.gapX - actionLayoutProfile.gapX) > 1e-7)
+            if (row.items.length > 1 && Math.abs(row.gapX - actionProfile.gapX) > 1e-7)
                 throw new Error(str.t('Изменился X-интервал экшена.', 'The action X gap has changed.'));
         }
-        if (Math.abs(getMedianDimension(plan.placements, 'height') - actionLayoutProfile.height) > 1e-7)
+        if (Math.abs(getMedianDimension(plan.placements, 'height') - actionProfile.height) > 1e-7)
             throw new Error(str.t('Изменилась опорная высота экшена.', 'The action reference height has changed.'));
     }
     var eps = 0.05, seenIds = {}, sourceIds = {};
@@ -6016,7 +5833,7 @@ function validateLayoutPlan(plan, geometry) {
             throw new Error(str.t('Слой "', 'Layer "') + p.name + str.t('" выходит за внешние границы выделения.', '" extends outside the outer selection bounds.'))
 
         if (!geometry.isRectangle) {
-            var allowed = getIntervalsForVerticalSpan(geometry, p.top, p.bottom),
+            var allowed = getVerticalIntervals(geometry, p.top, p.bottom),
                 inside = false;
             for (var k = 0; k < allowed.length; k++) {
                 if (p.left >= allowed[k].left - eps && p.right <= allowed[k].right + eps) {
@@ -6041,8 +5858,6 @@ function rectanglesOverlap(a, b, eps) {
         a.top < b.bottom - eps && a.bottom > b.top + eps
 }
 
-// Photoshop raster bounds can round to whole pixels. This checks native
-// results, not just planned coordinates; larger deviations cause history rollback.
 function validateAppliedBounds(expected, actual, name) {
     var eps = 1.01, keys = ['left', 'top', 'right', 'bottom'];
     for (var i = 0; i < keys.length; i++) {
@@ -6068,24 +5883,21 @@ function applyLayoutPlan() {
     if (!isFinite(scale) || scale <= 0) throw new Error(str.t('Некорректный общий масштаб.', 'Invalid common scale.'))
     if (!ids.length) throw new Error(str.t('Не удалось получить исходный набор слоёв для общей трансформации.', 'Could not get the source layer set for the common transform.'))
 
-    runLayoutProgressStage('Scaling layers', function () {
-        // For Transform only the selected set matters, not its palette-order
-        // representation. Check targetLayersIDs directly: one document query,
-        // no per-layer descriptors.
-        if (!selectedLayerSetMatches(ids)) {
+    progressStage('Scaling layers', function () {
+        if (!selectionMatches(ids)) {
             lr.selectLayers(ids);
-            if (!selectedLayerSetMatches(ids))
+            if (!selectionMatches(ids))
                 throw new Error(str.t('Photoshop не смог восстановить исходный набор слоёв перед общей трансформацией.', 'Photoshop could not restore the source layer set before the common transform.'));
         }
         if (Math.abs(scale - 1) > 0.0000001) lr.transformSelection(scale * 100);
     });
-    runLayoutProgressStage('Positioning photos', function () {
+    progressStage('Positioning photos', function () {
         var total = layoutPlan.placements.length;
         for (i = 0; i < total; i++) {
             var p = layoutPlan.placements[i];
-            layoutUnitProgress(i, total, i + '/' + total);
+            unitProgress(i, total, i + '/' + total);
             lr.selectLayers([p.layerId]);
-            var boundsProperty = lr.getProperty('boundsNoEffects', p.layerId);
+            var boundsProperty = lr.getProperty('boundsNoEffects', false, p.layerId);
             if (!boundsProperty || !boundsProperty.value)
                 throw new Error(str.t('Не удалось получить boundsNoEffects слоя после общей трансформации.', 'Could not get layer boundsNoEffects after the common transform.'));
             var b = lr.descToObject(boundsProperty.value), actualLeft = Number(b.left), actualTop = Number(b.top),
@@ -6094,19 +5906,19 @@ function applyLayoutPlan() {
                 throw new Error(str.t('Не удалось рассчитать итоговое положение слоя "', 'Could not calculate the final position of layer "') + p.name + str.t('".', '".'));
             if (Math.abs(dX) > 0.0001 || Math.abs(dY) > 0.0001) lr.move(dX, dY);
             if (layoutPlan.lockedMetrics) {
-                var applied = lr.getProperty('boundsNoEffects', p.layerId);
+                var applied = lr.getProperty('boundsNoEffects', false, p.layerId);
                 if (!applied || !applied.value) throw new Error(str.t('Не удалось проверить итоговые границы рамки.', 'Could not verify the final frame bounds.'));
                 validateAppliedBounds(p, lr.descToObject(applied.value), p.name);
             }
-            layoutUnitProgress(i + 1, total, (i + 1) + '/' + total);
+            unitProgress(i + 1, total, (i + 1) + '/' + total);
         }
     });
-    if (cfg.groupRows) runLayoutProgressStage('Grouping rows', function () { groupLayoutRows(layoutPlan.rows); });
+    if (cfg.groupRows) progressStage('Grouping rows', function () { groupLayoutRows(layoutPlan.rows); });
 }
 
 function groupLayoutRows(rows, preparedMap) {
     for (var r = rows.length - 1; r >= 0; r--) {
-        layoutUnitProgress(rows.length - r - 1, rows.length, (rows.length - r - 1) + '/' + rows.length + ' — Row ' + (r + 1));
+        unitProgress(rows.length - r - 1, rows.length, (rows.length - r - 1) + '/' + rows.length + ' — Row ' + (r + 1));
 
         var ids = [], seen = {};
         for (var i = 0; i < rows[r].items.length; i++) {
@@ -6121,7 +5933,7 @@ function groupLayoutRows(rows, preparedMap) {
 
         lr.selectLayers(ids)
         lr.groupSelectedLayers()
-        layoutUnitProgress(rows.length - r, rows.length, (rows.length - r) + '/' + rows.length + ' — Row ' + (r + 1));
+        unitProgress(rows.length - r, rows.length, (rows.length - r) + '/' + rows.length + ' — Row ' + (r + 1));
     }
 }
 
@@ -6136,11 +5948,11 @@ function restoreLayerSelection(ids, activeId) {
     lr.selectLayers(ordered.length ? ordered : ids)
 }
 
-function shouldCollapseAllGroupsAfterLayout() {
+function shouldCollapseGroups() {
     if (cfg && cfg.groupRows) return true;
-    if (!inputPreparation || !inputPreparation.units) return false;
-    for (var i = 0; i < inputPreparation.units.length; i++) {
-        var roots = inputPreparation.units[i].roots || [];
+    if (!preparation || !preparation.units) return false;
+    for (var i = 0; i < preparation.units.length; i++) {
+        var roots = preparation.units[i].roots || [];
         for (var r = 0; r < roots.length; r++)
             if (roots[r] && roots[r].section == 'layerSectionStart') return true;
     }
@@ -6149,7 +5961,7 @@ function shouldCollapseAllGroupsAfterLayout() {
 
 function collapseAllLayerGroups() {
     try {
-        if (typeof app != 'undefined' && typeof app.runMenuItem == 'function')
+        if (typeof app.runMenuItem == 'function')
             app.runMenuItem(s2t('collapseAllGroupsEvent'));
     } catch (e) {}
 }
@@ -6172,7 +5984,7 @@ function round2(v) {
 }
 
 
-function OptionalPythonFeatures(api, failureLimit) {
+function PythonFeature(api, failureLimit) {
     var state = {};
 
     function resetState() {
@@ -6264,8 +6076,6 @@ function OptionalPythonFeatures(api, failureLimit) {
         try {
             var value = api.sendPayload(type, payload, { longRequest: !!options.photo || (type == 'gender_names' || type == 'alphabet_names') });
 
-            // A valid result, including an explicit low-confidence/unknown result,
-            // proves that the optional method is functioning and breaks the streak.
             if (!options.deferSuccess) this.recordSuccess();
             return { ok: true, value: value, disabled: false };
         } catch (e) {
@@ -6279,8 +6089,6 @@ function OptionalPythonFeatures(api, failureLimit) {
 }
 
 
-// ExtendScript has no guaranteed native JSON.parse. Parse data without executing
-// input text; reject truncated replies, expressions and non-finite numbers.
 function parseJSONData(text) {
     var input = String(text), pos = 0, size = input.length;
     function fail() { throw new Error('Invalid JSON data'); }
@@ -6321,7 +6129,6 @@ function parseJSONData(text) {
                 else {
                     if (input.charAt(pos) != '"') fail();
                     key = stringValue(); space();
-                    // Protocol objects never need prototype or method keys.
                     if (key == '__proto__' || key == 'constructor' || key == 'prototype' || key == 'hasOwnProperty') fail();
                     if (result.hasOwnProperty(key) || input.charAt(pos++) != ':') fail();
                     result[key] = value(depth + 1);
@@ -6349,7 +6156,7 @@ function parseJSONData(text) {
 
 function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     var sequence = 0,
-        session = (new Date()).getTime() + '-' + Math.floor(Math.random() * 1000000),
+        session = (new Date).getTime() + '-' + Math.floor(Math.random() * 1000000),
         serverID = 'auto-layout/' + ver,
         initializationResult = null;
 
@@ -6383,14 +6190,12 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     }
 
     function serverIsListening() {
-        var socket = new Socket(),
+        var socket = new Socket,
             opened = false;
         try {
             socket.timeout = 1;
             opened = socket.open(apiHost + ':' + portSend, 'UTF-8');
             if (!opened) return false;
-            // Heartbeat is intentionally fire-and-forget and needs no response
-            // listener, so probing the port does not generate server errors.
             socket.writeln(objectToJSON({ type: 'heartbeat', target_id: '__shutdown_probe__' }));
             return true;
         } catch (e) {
@@ -6401,20 +6206,17 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     }
 
     function waitServerStop(delay) {
-        var start = (new Date()).getTime();
-        while ((new Date()).getTime() - start < delay) {
+        var start = (new Date).getTime();
+        while ((new Date).getTime() - start < delay) {
             if (!serverIsListening()) return true;
-            if (pulseLayoutProgress() === false) throwCancelled();
+            if (pulseProgress() === false) throwCancelled();
             $.sleep(100);
         }
         return !serverIsListening();
     }
 
-    function forceStopConfirmedServer() {
-        // A previous server may not stop cooperatively. Only call this after a
-        // successful handshake has proved that the listener is an Auto Layout
-        // server. The helper kills the process owning our dedicated TCP port.
-        var token = (new Date()).getTime() + '_' + Math.floor(Math.random() * 1000000),
+    function forceStopServer() {
+        var token = (new Date).getTime() + '_' + Math.floor(Math.random() * 1000000),
             batName = 'AutoLayout_stop_' + token + '.bat',
             vbsName = 'AutoLayout_stop_' + token + '.vbs',
             bat = new File(Folder.temp + '/' + batName),
@@ -6453,13 +6255,12 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     function stopIncompatibleServer(result) {
         if (!isAutoLayoutServer(result)) return false;
 
-        if (layoutProgressRun && layoutProgressRun.active) { layoutProgressRun.detail = 'Closing previous Python version'; pulseLayoutProgress(true); }
+        if (progressInfo && progressInfo.active) { progressInfo.detail = 'Closing previous Python version'; pulseProgress(true); }
         else app.changeProgressText('Closing previous Python version...');
 
-        // Try cooperative shutdown first, then replace the confirmed old server.
         controlRequest('shutdown', '', true);
         if (waitServerStop(2500)) return true;
-        return forceStopConfirmedServer();
+        return forceStopServer();
     }
 
     function localAvailability() {
@@ -6493,9 +6294,6 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
     };
 
     this.getAvailability = function () {
-        // The server itself is optional. A stopped server is not an error when the
-        // local runtime is installed: it will be launched only if a Python feature
-        // is actually requested.
         try {
             var result = sendMessage({ type: 'handshake', message: '' }, 300);
             if (isHandshake(result)) return { available: true, reason: '', message: '' };
@@ -6535,11 +6333,11 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             if (!r.launcher.execute())
                 return { ok: false, reason: 'launcher_failed', message: str.t('Не удалось запустить приватный Python launcher.', 'Could not start the private Python launcher.') };
 
-            var start = (new Date()).getTime();
-            if (layoutProgressRun && layoutProgressRun.active) { layoutProgressRun.detail = 'Starting Python module'; pulseLayoutProgress(true); }
+            var start = (new Date).getTime();
+            if (progressInfo && progressInfo.active) { progressInfo.detail = 'Starting Python module'; pulseProgress(true); }
             else app.changeProgressText('Starting Python module...');
-            while ((new Date()).getTime() - start < INIT_DELAY) {
-                if (pulseLayoutProgress() === false) throwCancelled();
+            while ((new Date).getTime() - start < INIT_DELAY) {
+                if (pulseProgress() === false) throwCancelled();
                 result = sendMessage({ type: 'handshake', message: '' }, 1000);
                 if (isHandshake(result)) return { ok: true };
                 if (result)
@@ -6569,7 +6367,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
 
     this.sendPayload = function (type, payload, options) {
         options = options || {};
-        if (options.longRequest === true) beginPythonProgressWait();
+        if (options.longRequest === true) beginPythonWait();
         try {
             var result = sendMessage({ type: type, message: payload, long_request: options.longRequest === true }, ANALYSIS_DELAY);
             if (!result) throw new Error(str.t('Превышено время ожидания ответа Python.', 'Python response timeout.'));
@@ -6577,11 +6375,11 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
             if (result.type == 'cancelled') throwCancelled();
             if (result.type == 'error') throw new Error(String(result.message));
             return result.type == 'answer' ? result.message : null;
-        } finally { if (options.longRequest === true) endPythonProgressWait(); }
+        } finally { if (options.longRequest === true) endPythonWait(); }
     };
 
     function controlRequest(type, targetID, waitReply) {
-        var socket = new Socket();
+        var socket = new Socket;
         try {
             socket.timeout = waitReply ? 6 : 1;
             if (!socket.open(apiHost + ':' + portSend, 'UTF-8')) return false;
@@ -6595,8 +6393,8 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
 
     function sendMessage(o, delay) {
         o.request_id = session + '-' + (++sequence);
-        var listener = new Socket(),
-            sender = new Socket(),
+        var listener = new Socket,
+            sender = new Socket,
             longRequest = o.long_request === true,
             sent = false,
             received = false;
@@ -6610,21 +6408,19 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
                     throw new Error(str.t('Не удалось передать запрос Python.', 'Could not send the Python request.'));
             } catch (connectionError) {
                 if (connectionError.number == 8007) throw connectionError;
-                // A server that is still starting can refuse or reset a probe.
-                // Keep polling until the startup deadline, not just one attempt.
                 if (o.type == 'handshake') return null;
                 throw connectionError;
             }
             sender.close();
 
-            var start = (new Date()).getTime(),
+            var start = (new Date).getTime(),
                 lastPulse = start,
                 lastHeartbeat = start;
-            while ((new Date()).getTime() - start < delay) {
-                var now = (new Date()).getTime();
+            while ((new Date).getTime() - start < delay) {
+                var now = (new Date).getTime();
                 if (longRequest && now - lastPulse >= 100) {
                     lastPulse = now;
-                    if (pulseLayoutProgress() === false) throwCancelled();
+                    if (pulseProgress() === false) throwCancelled();
                 }
                 if (longRequest && now - lastHeartbeat >= 1000) {
                     lastHeartbeat = now;
@@ -6680,14 +6476,13 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
 }
 
 function AM(target, order) {
-    var s2t = stringIDToTypeID,
-        t2s = typeIDToStringID,
-        AR = ActionReference,
-        AD = ActionDescriptor;
+    var AR = ActionReference,
+        AD = ActionDescriptor,
+        AL = ActionList;
 
     target = target ? s2t(target) : null;
 
-    this.getProperty = function (property, id, idxMode, descMode) {
+    this.getProperty = function (property, descMode, id, idxMode) {
         property = s2t(property);
         var r = new AR;
         r.putProperty(s2t('property'), property);
