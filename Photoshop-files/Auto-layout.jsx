@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.51',
+const ver = '0.10.52',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -163,7 +163,7 @@ function main() {
         }, 32, 55);
         if (alphabetical && cfg.alphabetOrder == 'zone')
             layoutPlan = sortAlphabeticalZones(layoutPlan, selGeometry);
-        layoutPlan = arrangeTogether(layoutPlan, selGeometry);
+        if (!layoutPlan.pythonComposition) layoutPlan = arrangeTogether(layoutPlan, selGeometry);
         layoutPlan.genderSummary = genderInfo;
         if (semanticRequested) progressStage('Semantic ordering', function () {
             var useColor = !!(analysis.color && !analysis.color.fallbackToGeometry),
@@ -772,6 +772,7 @@ function mainDialog(editingAction) {
         chAlternateGender.enabled = normal && pythonAvailability.available;
         chHeadTurn.enabled = normal && headAvailability.available;
         dlColor.enabled = stColor.enabled = normal && pythonAvailability.available;
+        dlTogether.enabled = stTogether.enabled = normal;
         updateGapLabels();
     }
 
@@ -2341,7 +2342,7 @@ function priorityDropdownValue(control) {
 function validatePriorities() {
     var first = normalizePriorityLabel(cfg.priorityStartLabel), last = normalizePriorityLabel(cfg.priorityEndLabel);
     var together = normalizePriorityLabel(cfg.togetherLabel);
-    if (together != 'off' && (together == first || together == last))
+    if (!alphabetOrderActive() && together != 'off' && (together == first || together == last))
         throw new Error(str.t('Для «Рядом» выберите отдельный цвет метки.', 'Choose a separate label color for Together.'));
     if (first != 'off' && first == last)
         throw new Error(str.t('Выберите разные метки для начала и конца листа.', 'Choose different labels for the beginning and end of the sheet.'));
@@ -2373,7 +2374,7 @@ function priorityForRoots(roots) {
 
 function isTogetherLabel(label) {
     var selected = normalizePriorityLabel(cfg.togetherLabel);
-    return selected != 'off' && String(label || 'none') == selected;
+    return !alphabetOrderActive() && selected != 'off' && String(label || 'none') == selected;
 }
 
 function togetherForRoots(roots) {
@@ -2396,7 +2397,7 @@ function togetherSlotsValid(mask, rows) {
 
 // Shared by JSX and Python layouts: preserve geometry and reserve a compact block.
 function arrangeTogether(plan, geometry, trialOnly) {
-    if (plan.togetherMask || normalizePriorityLabel(cfg.togetherLabel) == 'off') return plan;
+    if (plan.togetherMask || alphabetOrderActive() || normalizePriorityLabel(cfg.togetherLabel) == 'off') return plan;
     var slots = [], marked = [], others = [], r, c, i;
     for (r = 0; r < plan.rows.length; r++) for (c = 0; c < plan.rows[r].items.length; c++) {
         var item = plan.rows[r].items[c];
@@ -2417,6 +2418,10 @@ function arrangeTogether(plan, geometry, trialOnly) {
         options.push({ start: start, rows: last.row - first.row + 1, zones: zones, balance: balance });
     }
     options.sort(function (a, b) { return a.rows - b.rows || a.zones - b.zones || a.balance - b.balance || a.start - b.start; });
+    var reference = Math.max(plan.commonScale, plan.compositionReferenceScale || 0, plan.verticalReferenceScale || 0),
+        floorScale = reference * (1 - COMPOSITION_MAX_SCALE_LOSS),
+        flexible = !plan.lockedMetrics && !fixedLayoutActive() && floorScale < plan.commonScale - 1e-10;
+    for (var attempt = 0; attempt < (flexible ? 2 : 1); attempt++) {
     for (var o = 0; o < options.length; o++) {
         var rows = [], mi = 0, oi = 0, option = options[o];
         for (r = 0; r < plan.rows.length; r++) rows.push(plan.rows[r].items.slice(0));
@@ -2424,16 +2429,50 @@ function arrangeTogether(plan, geometry, trialOnly) {
             var slot = slots[i];
             rows[slot.row][slot.col] = i >= option.start && i < option.start + marked.length ? marked[mi++] : others[oi++];
         }
-        var candidate = rebuildAssignedLayout(plan, geometry, rows, true);
+        var unchanged = true;
+        for (r = 0; r < rows.length && unchanged; r++) for (c = 0; c < rows[r].length; c++)
+            if (rows[r][c].id != plan.rows[r].items[c].id) { unchanged = false; break; }
+        var candidate;
+        if (unchanged) {
+            candidate = {};
+            for (var key in plan) if (plan.hasOwnProperty(key)) candidate[key] = plan[key];
+        } else candidate = rebuildTogetherRows(plan, geometry, rows, attempt ? floorScale : plan.commonScale);
         if (!candidate) continue;
+        if (attempt) {
+            var low = floorScale, high = plan.commonScale;
+            for (var step = 0; step < 18; step++) {
+                var middle = (low + high) / 2, trial = rebuildTogetherRows(plan, geometry, rows, middle);
+                if (trial) { low = middle; candidate = trial; } else high = middle;
+            }
+            candidate.compositionReferenceScale = reference;
+            candidate.compositionScaleLoss = Math.max(0, 1 - candidate.commonScale / reference);
+        }
         candidate.togetherMask = [];
         for (r = 0; r < rows.length; r++) for (c = 0; c < rows[r].length; c++) candidate.togetherMask.push(!!rows[r][c].together);
         candidate.compositionGeometryBaseline = plan.compositionGeometryBaseline;
         candidate.compositionJSXBaseline = plan.compositionJSXBaseline;
         return candidate;
     }
+    }
     if (trialOnly) return null;
     throw new Error(str.t('Не удалось разместить метку «Рядом» с текущими размерами рядов и интервалами.', 'Could not place the Together label with the current row sizes and gaps.'));
+}
+
+function rebuildTogetherRows(plan, geometry, rows, scale) {
+    if (scale == plan.commonScale) return rebuildAssignedLayout(plan, geometry, rows, true);
+    var seed = {}, ratio = scale / plan.commonScale, key;
+    for (key in plan) if (plan.hasOwnProperty(key)) seed[key] = plan[key];
+    seed.commonScale = scale;
+    var fields = ['minFinalGapX', 'minFinalGapY', 'actualGapXMin', 'actualGapXMax', 'actualGapY'];
+    for (var i = 0; i < fields.length; i++) seed[fields[i]] = plan[fields[i]] * ratio;
+    seed.rows = [];
+    for (var r = 0; r < plan.rows.length; r++) {
+        var row = {};
+        for (key in plan.rows[r]) if (plan.rows[r].hasOwnProperty(key)) row[key] = plan.rows[r][key];
+        row.gapX *= ratio;
+        seed.rows.push(row);
+    }
+    return rebuildAssignedLayout(seed, geometry, rows, true);
 }
 
 function getItemPriority(item) { return item.priority === 0 ? 0 : item.priority === 2 ? 2 : 1; }
@@ -2446,7 +2485,12 @@ function assignLabelPriorities(items) {
         indexed.push({ item: items[i], index: i });
     }
     indexed.sort(function (a, b) { return (getItemPriority(a.item) - getItemPriority(b.item)) || (a.index - b.index); });
-    for (i = 0; i < indexed.length; i++) output.push(indexed[i].item);
+    var togetherCount = 0;
+    for (i = 0; i < indexed.length; i++) {
+        output.push(indexed[i].item);
+        if (indexed[i].item.together) togetherCount++;
+    }
+    if (togetherCount < 2) for (i = 0; i < output.length; i++) output[i].together = false;
     return output;
 }
 
