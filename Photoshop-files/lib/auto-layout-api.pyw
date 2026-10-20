@@ -83,7 +83,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.49"
+SERVER_ID = "auto-layout/0.10.51"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -1373,8 +1373,11 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
     required = sum(1 << c for c in components) if len(items) >= len(components) else 0
     total_zone_area = sum(z["width"] * z["height"] for z in zones)
     n = len(items)
-    def rhythm_cost(counts):
+    @lru_cache(maxsize=4096)
+    def cached_rhythm_cost(counts):
         return row_rhythm_cost(counts, rhythm)
+    def rhythm_cost(counts):
+        return 0.0 if rhythm == "auto" else cached_rhythm_cost(tuple(counts))
     def search(scale, metrics, area_prefix):
         # State keeps exact consumed count and component mask; fixed-row mode
         # also keeps row count. Per-zone DP tests every consecutive row split.

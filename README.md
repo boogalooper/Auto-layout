@@ -108,5 +108,3 @@ C:\Program Files\Adobe\Adobe Photoshop 2026\Presets\Scripts\
 ## Удаление
 
 Чтобы удалить скрипт, уберите `Align and fit layers.jsx` и `lib/align-fit-api.pyw` из папки сценариев Photoshop. Если дополнительная среда Python больше не нужна, дождитесь завершения сервера и удалите папку `%LOCALAPPDATA%\JazzyScripts\AlignFitRuntime`.
-
-История последних изменений доступна в [CHANGELOG.md](CHANGELOG.md).

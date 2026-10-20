@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.49',
+const ver = '0.10.51',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -163,6 +163,7 @@ function main() {
         }, 32, 55);
         if (alphabetical && cfg.alphabetOrder == 'zone')
             layoutPlan = sortAlphabeticalZones(layoutPlan, selGeometry);
+        layoutPlan = arrangeTogether(layoutPlan, selGeometry);
         layoutPlan.genderSummary = genderInfo;
         if (semanticRequested) progressStage('Semantic ordering', function () {
             var useColor = !!(analysis.color && !analysis.color.fallbackToGeometry),
@@ -632,6 +633,9 @@ function mainDialog(editingAction) {
         grPriorityEnd = pnPriority.add("group{orientation:'row',alignChildren:['left','center'],spacing:8}"),
         stPriorityEnd = grPriorityEnd.add("statictext{preferredSize:[125,-1]}"),
         dlPriorityEnd = grPriorityEnd.add("dropdownlist{preferredSize:[170,-1]}"),
+        grTogether = pnPriority.add("group{orientation:'row',alignChildren:['left','center'],spacing:8}"),
+        stTogether = grTogether.add("statictext{preferredSize:[125,-1]}"),
+        dlTogether = grTogether.add("dropdownlist{preferredSize:[170,-1]}"),
         pnOutput = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
         chGroupRows = pnOutput.add('checkbox'),
         pnAction = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
@@ -656,13 +660,16 @@ function mainDialog(editingAction) {
     slGapX.alignment = slGapY.alignment = slGapMax.alignment = ['fill', 'center'];
     stPythonStatus.alignment = ['fill', 'top'];
     dlColor.alignment = dlAlphabet.alignment = ['fill', 'center'];
-    grPriorityStart.alignment = grPriorityEnd.alignment = ['fill', 'center'];
-    dlPriorityStart.alignment = dlPriorityEnd.alignment = ['fill', 'center'];
+    grPriorityStart.alignment = grPriorityEnd.alignment = grTogether.alignment = ['fill', 'center'];
+    dlPriorityStart.alignment = dlPriorityEnd.alignment = dlTogether.alignment = ['fill', 'center'];
     pnPriority.text = str.t('Приоритеты по меткам', 'Layer label priorities');
     stPriorityStart.text = str.t('В начале листа', 'At sheet beginning');
     stPriorityEnd.text = str.t('В конце листа', 'At sheet end');
     fillPriorityDropdown(dlPriorityStart, cfg.priorityStartLabel);
     fillPriorityDropdown(dlPriorityEnd, cfg.priorityEndLabel);
+    stTogether.text = str.t('Рядом', 'Together');
+    fillPriorityDropdown(dlTogether, cfg.togetherLabel);
+    dlTogether.helpTip = str.t('Соседние места в одном ряду; если мест недостаточно — в соседних рядах. Используйте отдельный цвет метки.', 'Adjacent positions in one row, spilling into adjacent rows when necessary. Use a separate label color.');
     dlPriorityStart.helpTip = dlPriorityEnd.helpTip = str.t('Строгий порядок для всего листа: начало, остальные, конец. Внутри категории действует выбранный способ раскладки.', 'Strict whole-sheet order: beginning, remaining photos, end. The selected layout policy applies within each category.');
 
     dlg.text = 'Auto layout ' + ver
@@ -820,6 +827,7 @@ function mainDialog(editingAction) {
     ok.onClick = function () {
         cfg.priorityStartLabel = priorityDropdownValue(dlPriorityStart);
         cfg.priorityEndLabel = priorityDropdownValue(dlPriorityEnd);
+        cfg.togetherLabel = priorityDropdownValue(dlTogether);
         try { validatePriorities(); } catch (priorityError) { alert(priorityError.message, 'Auto layout'); return; }
         for (var cb = 0; cb < checkboxSettings.length; cb++)
             cfg[checkboxSettings[cb][1]] = !!checkboxSettings[cb][0].value;
@@ -968,6 +976,7 @@ function Config() {
 
     this.priorityStartLabel = 'off'
     this.priorityEndLabel = 'off'
+    this.togetherLabel = 'off'
     this.noEnlarge = false
     this.autoRows = true
     this.rows = 5
@@ -992,6 +1001,7 @@ function Config() {
 
         this.priorityStartLabel = normalizePriorityLabel(this.priorityStartLabel);
         this.priorityEndLabel = normalizePriorityLabel(this.priorityEndLabel);
+        this.togetherLabel = normalizePriorityLabel(this.togetherLabel);
         this.noEnlarge = this.noEnlarge === true;
         this.alphabetOrder = normalizeAlphabetOrder(this.alphabetOrder);
         this.colorMode = normalizeColorMode(this.colorMode);
@@ -1007,6 +1017,7 @@ function Config() {
     this.putSettings = function (toAction) {
         settingsObj.priorityStartLabel = normalizePriorityLabel(settingsObj.priorityStartLabel);
         settingsObj.priorityEndLabel = normalizePriorityLabel(settingsObj.priorityEndLabel);
+        settingsObj.togetherLabel = normalizePriorityLabel(settingsObj.togetherLabel);
         settingsObj.alphabetOrder = normalizeAlphabetOrder(settingsObj.alphabetOrder);
         settingsObj.colorMode = normalizeColorMode(settingsObj.colorMode);
         var d = objectToDescriptor(settingsObj);
@@ -1041,7 +1052,7 @@ function Config() {
 
     function objectToDescriptor(o) {
         var d = new ActionDescriptor,
-            properties = ['priorityStartLabel', 'priorityEndLabel', 'noEnlarge', 'autoRows', 'rows', 'rowRhythm', 'horizontalAlign', 'gapX', 'gapY', 'maxGapMultiplier', 'alphabetOrder', 'alternateGender', 'considerHeadTurn', 'colorMode', 'pythonPacking', 'lockForAction', 'groupRows'];
+            properties = ['priorityStartLabel', 'priorityEndLabel', 'togetherLabel', 'noEnlarge', 'autoRows', 'rows', 'rowRhythm', 'horizontalAlign', 'gapX', 'gapY', 'maxGapMultiplier', 'alphabetOrder', 'alternateGender', 'considerHeadTurn', 'colorMode', 'pythonPacking', 'lockForAction', 'groupRows'];
 
         for (var i = 0; i < properties.length; i++) {
             var key = properties[i],
@@ -2033,7 +2044,7 @@ function planInputPreparation(tree, selectedIds) {
         var fallback = roots[0], rank = { '5': 4, '1': 3, '7': 2, '4': 1, '3': 0 };
         for (j = 1; j < roots.length; j++) if ((rank[String(roots[j].kind)] || 0) > (rank[String(fallback.kind)] || 0)) fallback = roots[j];
         var unit = { roots: roots, members: all, convert: convert, name: convert && texts.length ? texts.join(' ') : fallback.name,
-            order: roots[0].itemIndex, priority: priorityForRoots(roots) };
+            order: roots[0].itemIndex, priority: priorityForRoots(roots), together: togetherForRoots(roots) };
         if (convert) validatePreparation(unit, tree);
         units.push(unit);
     }
@@ -2255,7 +2266,7 @@ function readLayoutLayer(d, fallbackId, order) {
         throw new Error(str.t('Слой "', 'Layer "') + name + str.t('" имеет некорректный bounding box.', '" has an invalid bounding box.'));
 
     return {
-        id: id, name: name, kind: kind, order: order, itemIndex: itemIndex, colorLabel: readLayerColorLabel(d),
+        id: id, name: name, kind: kind, smartObject: has('smartObject'), order: order, itemIndex: itemIndex, colorLabel: readLayerColorLabel(d),
         left: bounds.left, top: bounds.top, right: bounds.right, bottom: bounds.bottom,
         width: bounds.width, height: bounds.height, centerX: bounds.centerX, centerY: bounds.centerY
     };
@@ -2270,7 +2281,10 @@ function collectLayoutItems(ids) {
         progress(8 + 22 * (i / Math.max(1, count)), 'Layers ' + i + '/' + count);
         var d = cache && cache[String(id)] ? cache[String(id)] : lr.getDescriptor(id, false);
         var item = readLayoutLayer(d, id, i);
-        if (preparation) item.priority = preparation.units[i].priority;
+        if (preparation) {
+            item.priority = preparation.units[i].priority;
+            item.together = preparation.units[i].together;
+        }
         var identity = [];
         if (preparation) {
             var members = preparation.units[i].members;
@@ -2326,6 +2340,9 @@ function priorityDropdownValue(control) {
 
 function validatePriorities() {
     var first = normalizePriorityLabel(cfg.priorityStartLabel), last = normalizePriorityLabel(cfg.priorityEndLabel);
+    var together = normalizePriorityLabel(cfg.togetherLabel);
+    if (together != 'off' && (together == first || together == last))
+        throw new Error(str.t('Для «Рядом» выберите отдельный цвет метки.', 'Choose a separate label color for Together.'));
     if (first != 'off' && first == last)
         throw new Error(str.t('Выберите разные метки для начала и конца листа.', 'Choose different labels for the beginning and end of the sheet.'));
 }
@@ -2354,12 +2371,78 @@ function priorityForRoots(roots) {
     return result;
 }
 
+function isTogetherLabel(label) {
+    var selected = normalizePriorityLabel(cfg.togetherLabel);
+    return selected != 'off' && String(label || 'none') == selected;
+}
+
+function togetherForRoots(roots) {
+    var together = false;
+    for (var i = 0; i < roots.length; i++) if (isTogetherLabel(roots[i].colorLabel)) together = true;
+    if (together && priorityForRoots(roots) != 1)
+        throw new Error(str.t('Связанный набор имеет метки «Рядом» и начала/конца листа. Оставьте одну роль для набора.', 'A linked set has both Together and beginning/end labels. Choose one role for the set.'));
+    return together;
+}
+
+function assignmentClass(item) { return getItemPriority(item) + (item.together ? 0.5 : 0); }
+
+function togetherSlotsValid(mask, rows) {
+    if (!mask) return true;
+    var n = 0;
+    for (var r = 0; r < rows.length; r++) for (var c = 0; c < rows[r].length; c++, n++)
+        if (n >= mask.length || !!rows[r][c].together != mask[n]) return false;
+    return n == mask.length;
+}
+
+// Shared by JSX and Python layouts: preserve geometry and reserve a compact block.
+function arrangeTogether(plan, geometry, trialOnly) {
+    if (plan.togetherMask || normalizePriorityLabel(cfg.togetherLabel) == 'off') return plan;
+    var slots = [], marked = [], others = [], r, c, i;
+    for (r = 0; r < plan.rows.length; r++) for (c = 0; c < plan.rows[r].items.length; c++) {
+        var item = plan.rows[r].items[c];
+        if (getItemPriority(item) != 1) continue;
+        slots.push({ row: r, col: c });
+        (item.together ? marked : others).push(item);
+    }
+    if (marked.length < 2) return plan;
+    var options = [];
+    for (var start = 0; start <= slots.length - marked.length; start++) {
+        var end = start + marked.length - 1, first = slots[start], last = slots[end], zones = 0, balance = 0;
+        for (r = first.row; r <= last.row; r++) {
+            if (r > first.row && plan.rows[r].zoneIndex != plan.rows[r - 1].zoneIndex) zones++;
+            var left = r == first.row ? first.col : 0,
+                right = r == last.row ? last.col : plan.rows[r].items.length - 1;
+            balance += Math.abs(left + right - (plan.rows[r].items.length - 1));
+        }
+        options.push({ start: start, rows: last.row - first.row + 1, zones: zones, balance: balance });
+    }
+    options.sort(function (a, b) { return a.rows - b.rows || a.zones - b.zones || a.balance - b.balance || a.start - b.start; });
+    for (var o = 0; o < options.length; o++) {
+        var rows = [], mi = 0, oi = 0, option = options[o];
+        for (r = 0; r < plan.rows.length; r++) rows.push(plan.rows[r].items.slice(0));
+        for (i = 0; i < slots.length; i++) {
+            var slot = slots[i];
+            rows[slot.row][slot.col] = i >= option.start && i < option.start + marked.length ? marked[mi++] : others[oi++];
+        }
+        var candidate = rebuildAssignedLayout(plan, geometry, rows, true);
+        if (!candidate) continue;
+        candidate.togetherMask = [];
+        for (r = 0; r < rows.length; r++) for (c = 0; c < rows[r].length; c++) candidate.togetherMask.push(!!rows[r][c].together);
+        candidate.compositionGeometryBaseline = plan.compositionGeometryBaseline;
+        candidate.compositionJSXBaseline = plan.compositionJSXBaseline;
+        return candidate;
+    }
+    if (trialOnly) return null;
+    throw new Error(str.t('Не удалось разместить метку «Рядом» с текущими размерами рядов и интервалами.', 'Could not place the Together label with the current row sizes and gaps.'));
+}
+
 function getItemPriority(item) { return item.priority === 0 ? 0 : item.priority === 2 ? 2 : 1; }
 
 function assignLabelPriorities(items) {
     var indexed = [], output = [], i;
     for (i = 0; i < items.length; i++) {
         if (items[i].priority == undefined) items[i].priority = priorityForLabel(items[i].colorLabel);
+        if (items[i].together == undefined) items[i].together = isTogetherLabel(items[i].colorLabel);
         indexed.push({ item: items[i], index: i });
     }
     indexed.sort(function (a, b) { return (getItemPriority(a.item) - getItemPriority(b.item)) || (a.index - b.index); });
@@ -2459,10 +2542,10 @@ function applyHeadTurnResult(target, headResult) {
 }
 
 // Session token prevents document IDs from colliding after Photoshop restarts.
-function photoCacheKeys(items) {
+function photoCacheKeys(items, documentId) {
     if (!$.global.autoLayoutCacheSession)
         $.global.autoLayoutCacheSession = new Date().getTime() + '-' + Math.random();
-    var documentId = doc.getProperty('documentID'), keys = [];
+    var keys = [];
     for (var i = 0; i < items.length; i++) keys.push(objectToJSON([
         $.global.autoLayoutCacheSession, documentId, items[i].name, items[i].analysisIdentity
     ]));
@@ -2509,11 +2592,11 @@ function analyzeSemantics(items) {
     for (i = 0; i < items.length; i++)
         if (items[i].kind != 4 && (colorReady || headReady || (genderReady && items[i].gender == 'U'))) photoItems.push(items[i]);
     if (photoItems.length) {
-        var cacheKeys = photoCacheKeys(photoItems), cachedPhotos = [];
+        var parentDocumentId = doc.getProperty('documentID'),
+            cacheKeys = photoCacheKeys(photoItems, parentDocumentId), cachedPhotos = [];
         try { cachedPhotos = py.sendPayload('analysis_cache', cacheKeys) || []; }
         catch (cacheError) { if (cacheError.number == 8007) throw cacheError; }
-        var parentDocumentId = doc.getProperty('documentID'),
-            analysisBaseHistory = activeDocument.activeHistoryState,
+        var analysisBaseHistory = activeDocument.activeHistoryState,
             analysisAnchorHistory = null;
         try {
             for (i = 0; i < photoItems.length; i++) {
@@ -2829,7 +2912,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
             for (cc = 0; cc < plan.rows[rr].items.length; cc++) {
                 var seedItem = plan.rows[rr].items[cc];
                 if (!seedItem.colorPalette) continue;
-                var bucket = getItemPriority(seedItem) + '|' + (useGender ? String(seedItem.gender) : 'all');
+                var bucket = assignmentClass(seedItem) + '|' + (useGender ? String(seedItem.gender) : 'all');
                 if (!pools[bucket]) { pools[bucket] = []; locations[bucket] = []; }
                 pools[bucket].push(seedItem); locations[bucket].push({ row: rr, col: cc });
             }
@@ -2864,7 +2947,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
           for (var pairIndex = 0; pairIndex < (slots.length > 80 ? partnerCount : search.length - a - 1); pairIndex++) {
             var b = slots.length > 80 ? (a + 1 + (Math.floor(pairIndex * (slots.length - 1) / partnerCount) + pass) % (slots.length - 1)) % slots.length : a + 1 + pairIndex;
             var sa = search[a], sb = search[b], ia = best.rows[sa.row].items[sa.col], ib = best.rows[sb.row].items[sb.col];
-            if (getItemPriority(ia) != getItemPriority(ib)) continue;
+            if (assignmentClass(ia) != assignmentClass(ib)) continue;
             if (!ia.colorPalette || !ib.colorPalette || (useGender && ia.gender != ib.gender)) continue;
             var pairKey = Math.min(ia.id, ib.id) + ':' + Math.max(ia.id, ib.id);
             if (distances[pairKey] == undefined) distances[pairKey] = paletteDistance(ia.colorPalette, ib.colorPalette);
@@ -3016,8 +3099,12 @@ function applyGenderResult(item, result) {
 
 function restoreAnalysisHistory(parentDocumentId, anchorHistory, usePrevious) {
     try {
-        if (doc.getProperty('documentID') != parentDocumentId) doc.close(false);
-        if (doc.getProperty('documentID') != parentDocumentId) throw new Error(str.t('Исходный документ недоступен.', 'The source document is unavailable.'));
+        var currentDocumentId = doc.getProperty('documentID');
+        if (currentDocumentId != parentDocumentId) {
+            doc.close(false);
+            currentDocumentId = doc.getProperty('documentID');
+        }
+        if (currentDocumentId != parentDocumentId) throw new Error(str.t('Исходный документ недоступен.', 'The source document is unavailable.'));
         if (usePrevious) doc.selectPreviousHistoryState();
         else if (anchorHistory) activeDocument.activeHistoryState = anchorHistory;
         else throw new Error(str.t('Точка восстановления истории недоступна.', 'The history restore point is unavailable.'));
@@ -3071,20 +3158,18 @@ function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
     return result.path;
 
     function makePreview(o) {
-        if (lr.hasProperty('smartObject')) lr.rasterize();
+        if (item.smartObject) lr.rasterize();
         // Photoshop derives the embedded PSB filename from the layer name.
         if (unsafePreviewName(item.name)) lr.setLayerName('ALG_preview_' + item.id);
         lr.convertToSmartObject();
         lr.editSmartObject();
         doc.flatten();
-        doc.convertToRGB();
+        var info = doc.getPreviewInfo();
+        if (info.mode != 'RGBColor' && info.mode != 'RGBColorMode') doc.convertToRGB();
 
-        var docRes = doc.getProperty('resolution'),
-            docW = doc.getProperty('width') * docRes / 72,
-            docH = doc.getProperty('height') * docRes / 72,
-            f = new File(Folder.temp + '/ALG_' + doc.getProperty('documentID') + '_' +
+        var f = new File(Folder.temp + '/ALG_' + info.id + '_' +
                 (new Date).getTime() + '_' + Math.floor(Math.random() * 1000000) + '.jpg'),
-            k = GENDER_PREVIEW_SIZE / Math.min(docW, docH);
+            k = GENDER_PREVIEW_SIZE / Math.min(info.width, info.height);
 
         previews.push(f.fsName);
         if (k < 1) doc.setScale(k);
@@ -3213,7 +3298,7 @@ function setClosestRowRange(spec, geometry, scale, width, top) {
 }
 
 function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
-    if (!priorityOrderValid(itemRows)) return null;
+    if (!priorityOrderValid(itemRows) || !togetherSlotsValid(plan.togetherMask, itemRows)) return null;
     var specs = [], fixed = { minFinalGapX: plan.minFinalGapX, actualGapX: plan.actualGapXMin,
         actualGapXMin: plan.actualGapXMin, actualGapXMax: plan.actualGapXMax, byRow: {} }, r, c;
     for (r = 0; r < itemRows.length; r++) {
@@ -3348,7 +3433,7 @@ function optimizeSemantics(plan, geometry, useGender, useHead) {
         for (rr = 0; rr < rows.length; rr++) for (cc = 0; cc < rows[rr].length; cc++) {
             var item = rows[rr][cc];
             if (!item.headTurnValid) continue;
-            var key = getItemPriority(item) + '|' + (useGender ? item.gender : 'any') + '|' + item.width.toFixed(6) + '|' + item.height.toFixed(6);
+            var key = assignmentClass(item) + '|' + (useGender ? item.gender : 'any') + '|' + item.width.toFixed(6) + '|' + item.height.toFixed(6);
             if (!buckets[key]) buckets[key] = [];
             buckets[key].push({ row: rr, column: cc, item: item, x: position[String(item.id)] });
         }
@@ -3432,7 +3517,7 @@ function optimizeSemantics(plan, geometry, useGender, useHead) {
             if ((a % 8) == 0) unitProgress(pass + a / Math.max(1, searchSlots.length), 12, 'Gender and pose: pass ' + (pass + 1) + ', positions ' + a + '/' + searchSlots.length);
             for (var b = a + 1; b < searchSlots.length; b++) {
                 var sa = searchSlots[a], sb = searchSlots[b], ai = baseRows[sa.row][sa.column], bi = baseRows[sb.row][sb.column];
-                if (getItemPriority(ai) != getItemPriority(bi)) continue;
+                if (assignmentClass(ai) != assignmentClass(bi)) continue;
                 var genderChange = useGender && ai.gender != bi.gender,
                     poseChange = useHead && ai.headTurnValid && bi.headTurnValid && (ai.headTurn != bi.headTurn ||
                         (ai.headLeanValid ? ai.headLeanWeight * ai.headLean : 0) != (bi.headLeanValid ? bi.headLeanWeight * bi.headLean : 0));
@@ -3509,12 +3594,13 @@ function buildGenderLayout(items, geometry) {
 
 
 function sortGenderCheckerboard(items, distribution) {
-    if (!items.length || getItemPriority(items[0]) == getItemPriority(items[items.length - 1]))
-        return reorderGenderPool(items, distribution);
+    var uniform = true;
+    for (var u = 1; u < items.length; u++) if (assignmentClass(items[u]) != assignmentClass(items[0])) { uniform = false; break; }
+    if (uniform) return reorderGenderPool(items, distribution);
     var result = [], start = 0, rowStart, i, end, counts;
     while (start < items.length) {
         end = start + 1;
-        while (end < items.length && getItemPriority(items[end]) == getItemPriority(items[start])) end++;
+        while (end < items.length && assignmentClass(items[end]) == assignmentClass(items[start])) end++;
         counts = []; rowStart = 0;
         for (i = 0; i < distribution.length; i++) {
             var overlap = Math.min(end, rowStart + distribution[i]) - Math.max(start, rowStart);
@@ -4508,7 +4594,7 @@ function alignRowLeft(interval, rowWidth, count, blockWidth) {
 function copyLayoutMetadata(target, source) {
     copyDefinedPlanMetadata(target, source, [
         'shapedSelection', 'multiZoneSelection', 'zoneCount', 'usedZoneCount',
-        'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics', 'pythonComposition', 'verticalReferenceScale', 'compositionReferenceScale', 'compositionScaleLoss', 'compositionEvaluated', 'compositionColorCost'
+        'usedComponentCount', 'solverPasses', 'testedRows', 'pythonPacking', 'packingBudgetExhausted', 'packingFallbackReason', 'lockedMetrics', 'pythonComposition', 'verticalReferenceScale', 'compositionReferenceScale', 'compositionScaleLoss', 'compositionEvaluated', 'compositionColorCost', 'togetherMask'
     ]);
 }
 
@@ -4592,7 +4678,9 @@ function optimizeComposition(plan, geometry, useGender, useHead, useColor) {
     for (i = 0; i < candidates.length; i++) {
         if (candidates[i].commonScale < reference * (1 - COMPOSITION_MAX_SCALE_LOSS) - 1e-9) continue;
         setProgressRange(i / candidates.length, 1 / candidates.length);
-        var candidate = useGender || useHead ? optimizeSemantics(candidates[i], geometry, useGender, useHead) : candidates[i],
+        var grouped = arrangeTogether(candidates[i], geometry, true);
+        if (!grouped) continue;
+        var candidate = useGender || useHead ? optimizeSemantics(grouped, geometry, useGender, useHead) : grouped,
             score = semanticScore(candidate, geometry, useGender, useHead), colorCost = 0;
         if (useColor) {
             var colored = optimizeColorAssignment(candidate, geometry, useGender, useHead, cfg.colorMode),
@@ -5820,6 +5908,7 @@ function validateLayoutPlan(plan, geometry) {
     if (plan && plan.rows) {
         var priorityRows = [];
         for (var pr = 0; pr < plan.rows.length; pr++) priorityRows.push(plan.rows[pr].items);
+        if (!togetherSlotsValid(plan.togetherMask, priorityRows)) throw new Error(str.t('Нарушено размещение метки «Рядом».', 'Together label placement was violated.'));
         if (!priorityOrderValid(priorityRows)) throw new Error(str.t('Нарушен порядок приоритетов цветовых меток.', 'Layer label priority order was violated.'));
     }
     if (cfg.noEnlarge && plan && plan.commonScale > 1 + 1e-12)
@@ -6597,6 +6686,20 @@ function AM(target, order) {
         var d = new AD;
         d.putClass(s2t('to'), s2t('RGBColorMode'));
         executeAction(s2t('convertMode'), d, DialogModes.NO);
+    };
+
+    this.getPreviewInfo = function () {
+        var r = new AR;
+        r.putEnumerated(s2t('document'), s2t('ordinal'), s2t('targetEnum'));
+        var d = executeActionGet(r),
+            resolution = Number(getDescValue(d, s2t('resolution'))),
+            width = Number(getDescValue(d, s2t('width'))) * resolution / 72,
+            height = Number(getDescValue(d, s2t('height'))) * resolution / 72,
+            mode = d.hasKey(s2t('mode')) ? getDescValue(d, s2t('mode')) : null;
+        if (!isFinite(width) || !isFinite(height) || width <= 0 || height <= 0)
+            throw new Error('Invalid preview dimensions');
+        return { width: width, height: height, id: getDescValue(d, s2t('documentID')),
+            mode: mode && mode.value ? mode.value : '' };
     };
 
     this.setScale = function (scale) {
