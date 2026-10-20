@@ -10,6 +10,8 @@ import logging
 import math
 import itertools
 import urllib.request
+from collections import OrderedDict
+from copy import deepcopy
 from functools import lru_cache
 from importlib import resources
 from logging.handlers import RotatingFileHandler
@@ -81,7 +83,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.46"
+SERVER_ID = "auto-layout/0.10.47"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -1020,6 +1022,48 @@ def classify_clothing_colors(img, face_region, cancel_check=lambda: False):
         color["weight"] = round(color["weight"] / total, 6)
     return dict(analysis_status="ok", reason="", palette=palette,
                 method="face_anchored_clothing_lab_histogram", sample_count=len(pixels))
+
+
+# Measurements only: geometry is recalculated for every layout. Bounded, in memory.
+photo_analysis_cache = OrderedDict()
+photo_cache_lock = threading.Lock()
+PHOTO_CACHE_LIMIT = 512
+
+
+def valid_photo_cache_key(key):
+    return isinstance(key, str) and 0 < len(key) <= 65536
+
+
+def read_photo_cache(keys):
+    if not isinstance(keys, list) or len(keys) > 500 or not all(valid_photo_cache_key(k) for k in keys):
+        raise ValueError("Invalid analysis cache keys")
+    with photo_cache_lock:
+        result = []
+        for key in keys:
+            value = photo_analysis_cache.get(key)
+            if value is not None:
+                photo_analysis_cache.move_to_end(key)
+            result.append(deepcopy(value) if value is not None else {})
+    logging.info("analysis_cache hits=%d requested=%d", sum(bool(v) for v in result), len(keys))
+    return result
+
+
+def store_photo_cache(key, answer):
+    if not valid_photo_cache_key(key):
+        return
+    useful = {feature: deepcopy(answer[feature]) for feature in ("gender", "head_turn", "color")
+              if isinstance(answer.get(feature), dict) and answer[feature].get("analysis_status") == "ok"}
+    if not useful:
+        return
+    # A cached gender result must not retain a temporary proxy layer ID.
+    for value in useful.values():
+        value.pop("id", None)
+    with photo_cache_lock:
+        previous = photo_analysis_cache.setdefault(key, {})
+        previous.update(useful)
+        photo_analysis_cache.move_to_end(key)
+        while len(photo_analysis_cache) > PHOTO_CACHE_LIMIT:
+            photo_analysis_cache.popitem(last=False)
 
 
 def analyze_photo(payload, state):
@@ -2079,6 +2123,9 @@ def handle_client(client_socket):
         if kind == "handshake":
             reply("answer", SERVER_ID)
             return
+        if kind == "analysis_cache":
+            reply("answer", read_photo_cache(message.get("message")))
+            return
         if kind == "cleanup":
             reply("answer", queue_preview_cleanup(message.get("message")))
             return
@@ -2132,6 +2179,8 @@ def handle_client(client_socket):
                     if not isinstance(payload, dict):
                         raise ValueError(kind + " payload must be an object")
                     answer = analyze_photo(payload, state)
+                    if not request_cancelled(state):
+                        store_photo_cache(payload.get("cache_key"), answer)
                     if answer.get("gender"):
                         answer["gender"]["id"] = payload.get("id")
                         log_gender_result(payload.get("name", ""), answer["gender"], request_id, "image")

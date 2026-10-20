@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="950" height="330" viewBox="0 0 950 330" role="img" aria-labelledby="title"><title id="title">Выравнивание фотографии по человеку: до и после</title>
+<rect x="0" y="0" width="950" height="330" rx="12" fill="#f6f7f9" stroke="none" stroke-width="2"/>
+<text x="238" y="35" font-family="Arial,DejaVu Sans,sans-serif" font-size="18" fill="#303940" text-anchor="middle" font-weight="bold">До запуска</text>
+<text x="712" y="35" font-family="Arial,DejaVu Sans,sans-serif" font-size="18" fill="#303940" text-anchor="middle" font-weight="bold">После выравнивания</text>
+<rect x="50" y="55" width="375" height="220" rx="6" fill="white" stroke="#ccd8dc" stroke-width="2"/>
+<rect x="525" y="55" width="375" height="220" rx="6" fill="white" stroke="#ccd8dc" stroke-width="2"/>
+<rect x="82" y="77" width="186" height="174" rx="6" fill="#e4efee" stroke="none" stroke-width="2"/>
+<circle cx="125.0" cy="123.03999999999999" r="11.04" fill="#70aaa7"/>
+<path d="M106.6 223 L109.36 159.73 Q125.0 136.42000000000002 140.64 159.73 L143.4 223 Z" fill="#70aaa7"/>
+<rect x="172" y="79" width="140" height="174" rx="0" fill="none" stroke="#437d7a" stroke-width="2" stroke-dasharray="6 5"/>
+<rect x="642" y="79" width="140" height="174" rx="0" fill="#e4efee" stroke="#437d7a" stroke-width="2"/>
+<circle cx="712.0" cy="111.36" r="15.36" fill="#70aaa7"/>
+<path d="M686.4 235 L690.24 155.76999999999998 Q712.0 126.58 733.76 155.76999999999998 L737.6 235 Z" fill="#70aaa7"/>
+<path d="M712 72 L712 260" fill="none" stroke="#ccd8dc" stroke-width="2" stroke-dasharray="5 4"/>
+<path d="M443 165 L503 165" fill="none" stroke="#437d7a" stroke-width="2"/>
+<path d="M503 165 L495.10175694298664 169.31482984743784" fill="none" stroke="#437d7a" stroke-width="2"/>
+<path d="M503 165 L495.10175694298664 160.68517015256216" fill="none" stroke="#437d7a" stroke-width="2"/>
+<text x="238" y="307" font-family="Arial,DejaVu Sans,sans-serif" font-size="15" fill="#67747d" text-anchor="middle">Человек смещён относительно рамки</text>
+<text x="712" y="307" font-family="Arial,DejaVu Sans,sans-serif" font-size="15" fill="#67747d" text-anchor="middle">Масштаб и положение подобраны</text>
+</svg>

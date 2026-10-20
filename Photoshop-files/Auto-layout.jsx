@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.46',
+const ver = '0.10.47',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -2269,6 +2269,14 @@ function collectLayoutItems(ids) {
         var d = cache && cache[String(id)] ? cache[String(id)] : lr.getDescriptor(id, false);
         var item = readLayoutLayer(d, id, i);
         if (preparation) item.priority = preparation.units[i].priority;
+        var identity = [];
+        if (preparation) {
+            var members = preparation.units[i].members;
+            for (var m = 0; m < members.length; m++)
+                identity.push([members[m].id, members[m].name, members[m].kind, members[m].text]);
+            identity.sort(function (a, b) { return a[0] - b[0]; });
+        } else identity.push([id, item.name, item.kind]);
+        item.analysisIdentity = identity;
         output.push(item);
         progress(8 + 22 * ((i + 1) / Math.max(1, count)), 'Layers ' + (i + 1) + '/' + count);
     }
@@ -2434,6 +2442,31 @@ function sortAlphabeticalZones(plan, geometry) {
     return candidate;
 }
 
+function applyHeadTurnResult(target, headResult) {
+    target.headTurnValid = headResult.analysis_status == 'ok';
+    target.headTurn = target.headTurnValid ? Number(headResult.turn) : 0;
+    target.headTurnReason = headResult.reason || '';
+    target.headTurnByBody = headResult.method == 'body_head_combined';
+    target.headLeanValid = target.headTurnValid && headResult.head_status != 'uncertain' &&
+        typeof headResult.roll_degrees == 'number' && isFinite(headResult.roll_degrees) &&
+        typeof headResult.pitch_degrees == 'number' && isFinite(headResult.pitch_degrees);
+    if (target.headLeanValid) {
+        target.headLean = -headResult.roll_degrees;
+        target.headLeanWeight = Math.max(0, 1 - Math.abs(headResult.pitch_degrees) / 35);
+    }
+}
+
+// Session token prevents document IDs from colliding after Photoshop restarts.
+function photoCacheKeys(items) {
+    if (!$.global.autoLayoutCacheSession)
+        $.global.autoLayoutCacheSession = new Date().getTime() + '-' + Math.random();
+    var documentId = doc.getProperty('documentID'), keys = [];
+    for (var i = 0; i < items.length; i++) keys.push(objectToJSON([
+        $.global.autoLayoutCacheSession, documentId, items[i].name, items[i].analysisIdentity
+    ]));
+    return keys;
+}
+
 function analyzeSemantics(items) {
     genderPy.resetForRun();
     imageAnalysisDisabled = false;
@@ -2474,11 +2507,12 @@ function analyzeSemantics(items) {
     for (i = 0; i < items.length; i++)
         if (items[i].kind != 4 && (colorReady || headReady || (genderReady && items[i].gender == 'U'))) photoItems.push(items[i]);
     if (photoItems.length) {
+        var cacheKeys = photoCacheKeys(photoItems), cachedPhotos = [];
+        try { cachedPhotos = py.sendPayload('analysis_cache', cacheKeys) || []; }
+        catch (cacheError) { if (cacheError.number == 8007) throw cacheError; }
         var parentDocumentId = doc.getProperty('documentID'),
             analysisBaseHistory = activeDocument.activeHistoryState,
             analysisAnchorHistory = null;
-        app.activeDocument.suspendHistory('Auto layout analysis', 'function autoLayoutAnalysisAnchor () {return}');
-        analysisAnchorHistory = activeDocument.activeHistoryState;
         try {
             for (i = 0; i < photoItems.length; i++) {
                 var target = photoItems[i],
@@ -2489,21 +2523,40 @@ function analyzeSemantics(items) {
                 progress(30 + 2 * i / Math.max(1, photoItems.length), 'Photo ' + i + '/' + photoItems.length);
                 var previewPath = null;
                 try {
-                    previewHistoryTouched = true;
-                    previewPath = createGenderPreview(target, parentDocumentId, analysisAnchorHistory);
-                    beginPythonWait(1 / Math.max(1, photoItems.length), 4000);
-                    var driver = wantGender ? genderPy : wantHead ? headPy : colorPy,
-                        other = wantGender && wantHead ? headPy : null,
+                    var cached = cachedPhotos[i] || {},
+                        needGender = wantGender && !cached.gender,
+                        needHead = wantHead && !cached.head_turn,
+                        needColor = wantColor && !cached.color,
+                        driver = needGender ? genderPy : needHead ? headPy : colorPy,
+                        other = needGender && needHead ? headPy : null,
+                        call = { ok: true, value: { id: target.id } };
+                    if (wantGender && cached.gender) applyGenderResult(target, cached.gender);
+                    if (wantHead && cached.head_turn) applyHeadTurnResult(target, cached.head_turn);
+                    if (wantColor && cached.color) target.colorPalette = cached.color.palette;
+                    if (needGender || needHead || needColor) {
+                        if (!analysisAnchorHistory) {
+                            app.activeDocument.suspendHistory('Auto layout analysis', 'function autoLayoutAnalysisAnchor () {return}');
+                            analysisAnchorHistory = activeDocument.activeHistoryState;
+                        }
+                        previewHistoryTouched = true;
+                        previewPath = createGenderPreview(target, parentDocumentId, analysisAnchorHistory);
+                        beginPythonWait(1 / Math.max(1, photoItems.length), 4000);
                         call = driver.call('analyze_image', {
-                            id: target.id, name: target.name, path: previewPath,
-                            gender: wantGender, head_turn: wantHead, color: wantColor
+                            id: target.id, name: target.name, path: previewPath, cache_key: cacheKeys[i],
+                            gender: needGender, head_turn: needHead, color: needColor
                         }, { photo: true, deferSuccess: true });
+                    }
+                    if (call.ok && call.value && call.value.id == target.id) {
+                        if (cached.gender) call.value.gender = cached.gender;
+                        if (cached.head_turn) call.value.head_turn = cached.head_turn;
+                        if (cached.color) call.value.color = cached.color;
+                    }
                     if (!call.ok) {
                         imageEmptyStreak = 0;
                         if (other) other.recordPhotoFailure(call.reason || 'python_error', call.message);
-                        if (wantColor && driver != colorPy) colorPy.recordPhotoFailure(call.reason || 'python_error', call.message);
-                        target.headTurnReason = call.reason || 'python_error';
-                        if (wantGender) target.genderReason = call.reason || 'python_error';
+                        if (needColor && driver != colorPy) colorPy.recordPhotoFailure(call.reason || 'python_error', call.message);
+                        if (needHead) target.headTurnReason = call.reason || 'python_error';
+                        if (needGender) target.genderReason = call.reason || 'python_error';
                         continue;
                     }
                     var answer = call.value,
@@ -2549,18 +2602,8 @@ function analyzeSemantics(items) {
                             target.headTurnReason = headOutcome.reason;
                         } else {
                             headPy.recordSuccess();
-                            target.headTurnValid = headResult.analysis_status == 'ok';
-                            target.headTurn = target.headTurnValid ? Number(headResult.turn) : 0;
-                            target.headTurnReason = headResult.reason || '';
-                            target.headTurnByBody = headResult.method == 'body_head_combined';
+                            applyHeadTurnResult(target, headResult);
                             if (target.headTurnValid) semanticUsefulCount++;
-                            target.headLeanValid = target.headTurnValid && headResult.head_status != 'uncertain' &&
-                                typeof headResult.roll_degrees == 'number' && isFinite(headResult.roll_degrees) &&
-                                typeof headResult.pitch_degrees == 'number' && isFinite(headResult.pitch_degrees);
-                            if (target.headLeanValid) {
-                                target.headLean = -headResult.roll_degrees;
-                                target.headLeanWeight = Math.max(0, 1 - Math.abs(headResult.pitch_degrees) / 35);
-                            }
                         }
                     }
                     if (semanticRequestedCount) {
@@ -2571,11 +2614,11 @@ function analyzeSemantics(items) {
                     if (e.number == 8007 || e.autoLayoutRestoreFailure) throw e;
                     var message = e.message ? e.message : String(e);
                     imageEmptyStreak = 0;
-                    if (wantGender) genderPy.recordPhotoFailure('preview_error', message);
-                    if (wantHead) headPy.recordPhotoFailure('preview_error', message);
-                    if (wantColor) colorPy.recordPhotoFailure('preview_error', message);
-                    target.headTurnReason = 'preview_error';
-                    if (wantGender) target.genderReason = 'preview_error';
+                    if (needGender) genderPy.recordPhotoFailure('preview_error', message);
+                    if (needHead) headPy.recordPhotoFailure('preview_error', message);
+                    if (needColor) colorPy.recordPhotoFailure('preview_error', message);
+                    if (needHead) target.headTurnReason = 'preview_error';
+                    if (needGender) target.genderReason = 'preview_error';
                 } finally {
                     if (previewPath && !removePreview(previewPath)) {
                         try { py.cleanup(previewPath); } catch (cleanupError) { }
@@ -2585,7 +2628,7 @@ function analyzeSemantics(items) {
                 if (imageAnalysisDisabled) break;
             }
         } finally {
-            restoreAnalysisHistory(parentDocumentId, analysisBaseHistory, false);
+            if (analysisAnchorHistory) restoreAnalysisHistory(parentDocumentId, analysisBaseHistory, false);
         }
     }
     var failureMessages = [], featureStates = [];
