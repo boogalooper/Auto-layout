@@ -15,9 +15,10 @@
 // END__HARVEST_EXCEPTION_ZSTRING
 */
 
+
 $.localize = true;
 
-const ver = '0.10.53',
+const ver = '0.10.54',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -2289,9 +2290,9 @@ function collectLayoutItems(ids) {
         if (preparation) {
             var members = preparation.units[i].members;
             for (var m = 0; m < members.length; m++)
-                identity.push([members[m].id, members[m].name, members[m].kind, members[m].text]);
+                identity.push([members[m].id, members[m].name, members[m].kind, members[m].text || '']);
             identity.sort(function (a, b) { return a[0] - b[0]; });
-        } else identity.push([id, item.name, item.kind]);
+        } else identity.push([id, item.name, item.kind, '']);
         item.analysisIdentity = identity;
         output.push(item);
         progress(8 + 22 * ((i + 1) / Math.max(1, count)), 'Layers ' + (i + 1) + '/' + count);
@@ -2584,13 +2585,25 @@ function applyHeadTurnResult(target, headResult) {
     }
 }
 
-// Session token prevents document IDs from colliding after Photoshop restarts.
+// Nonpersistent Photoshop options survive separate JSX execution contexts.
+function photoCacheSession() {
+    var option = UUID + '-analysis-session', key = s2t('session'), descriptor, token;
+    try {
+        descriptor = app.getCustomOptions(option);
+        if (descriptor.hasKey(key)) token = descriptor.getString(key);
+    } catch (missingSession) { }
+    if (token) return token;
+    token = String(new Date().getTime()) + '-' + Math.random();
+    descriptor = new ActionDescriptor;
+    descriptor.putString(key, token);
+    app.putCustomOptions(option, descriptor, false);
+    return token;
+}
+
 function photoCacheKeys(items, documentId) {
-    if (!$.global.autoLayoutCacheSession)
-        $.global.autoLayoutCacheSession = new Date().getTime() + '-' + Math.random();
-    var keys = [];
+    var session = photoCacheSession(), keys = [];
     for (var i = 0; i < items.length; i++) keys.push(objectToJSON([
-        $.global.autoLayoutCacheSession, documentId, items[i].name, items[i].analysisIdentity
+        session, documentId, items[i].name, items[i].analysisIdentity
     ]));
     return keys;
 }
@@ -2636,8 +2649,11 @@ function analyzeSemantics(items) {
         if (items[i].kind != 4 && (colorReady || headReady || (genderReady && items[i].gender == 'U'))) photoItems.push(items[i]);
     if (photoItems.length) {
         var parentDocumentId = doc.getProperty('documentID'),
-            cacheKeys = photoCacheKeys(photoItems, parentDocumentId), cachedPhotos = [];
-        try { cachedPhotos = py.sendPayload('analysis_cache', cacheKeys) || []; }
+            cacheKeys = [], cachedPhotos = [];
+        try {
+            cacheKeys = photoCacheKeys(photoItems, parentDocumentId);
+            cachedPhotos = py.sendPayload('analysis_cache', cacheKeys) || [];
+        }
         catch (cacheError) { if (cacheError.number == 8007) throw cacheError; }
         var analysisBaseHistory = activeDocument.activeHistoryState,
             analysisAnchorHistory = null;
@@ -2670,7 +2686,7 @@ function analyzeSemantics(items) {
                         previewPath = createGenderPreview(target, parentDocumentId, analysisAnchorHistory);
                         beginPythonWait(1 / Math.max(1, photoItems.length), 4000);
                         call = driver.call('analyze_image', {
-                            id: target.id, name: target.name, path: previewPath, cache_key: cacheKeys[i],
+                            id: target.id, name: target.name, path: previewPath, cache_key: cacheKeys[i] || null,
                             gender: needGender, head_turn: needHead, color: needColor
                         }, { photo: true, deferSuccess: true });
                     }
