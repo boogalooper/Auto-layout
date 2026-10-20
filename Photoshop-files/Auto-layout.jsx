@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.48',
+const ver = '0.10.49',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -2077,7 +2077,8 @@ function prepareLayoutSources() {
         lr.selectLayers(roots);
         if (unit.convert) {
             if (roots.length > 1) lr.groupSelectedLayers();
-            lr.setLayerName('ALG_source_' + i);
+            if (roots.length == 1 && unsafePreviewName(unit.roots[0].name))
+                lr.setLayerName('ALG_source_' + i);
             lr.convertToSmartObject();
             lr.setLayerName(unit.name);
         }
@@ -3040,6 +3041,14 @@ function autoLayoutPreviewWork() {
     previewWork();
 }
 
+function unsafePreviewName(name) {
+    name = String(name);
+    return !name.length || name.length > 120 ||
+        /[<>:"\/\\|?*\x00-\x1f\x7f-\x9f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/.test(name) ||
+        /[. ]$/.test(name) ||
+        /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(name);
+}
+
 function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
     var result = { path: null },
         previewStateCreated = false;
@@ -3064,7 +3073,7 @@ function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
     function makePreview(o) {
         if (lr.hasProperty('smartObject')) lr.rasterize();
         // Photoshop derives the embedded PSB filename from the layer name.
-        lr.setLayerName('ALG_preview_' + item.id);
+        if (unsafePreviewName(item.name)) lr.setLayerName('ALG_preview_' + item.id);
         lr.convertToSmartObject();
         lr.editSmartObject();
         doc.flatten();
