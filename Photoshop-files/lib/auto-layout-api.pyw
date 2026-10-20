@@ -17,6 +17,7 @@ from importlib import resources
 from logging.handlers import RotatingFileHandler
 from concurrent.futures import ThreadPoolExecutor
 
+
 def prepare_install():
     """Stop only a verified Auto Layout server, before changing its environment."""
     probe = socket.socket()
