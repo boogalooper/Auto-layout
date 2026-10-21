@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.61',
+const ver = '0.10.62',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -2470,7 +2470,12 @@ function rebuildTogetherRows(plan, geometry, rows, scale) {
     return rebuildAssignedLayout(seed, geometry, rows, true);
 }
 
-function getItemPriority(item) { return item.priority === 0 ? 0 : item.priority === 2 ? 2 : 1; }
+function getItemPriority(item) {
+    if (typeof item.priority != 'number') return 1;
+    if (item.priority == 0) return 0;
+    if (item.priority == 2) return 2;
+    return 1;
+}
 
 function assignLabelPriorities(items) {
     var indexed = [], output = [], i;
