@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.60',
+const ver = '0.10.61',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -188,8 +188,8 @@ function main() {
         if (preparation) {
             preparedItems = originalItems;
             activeDocument.activeHistoryState = historyState;
-            activeDocument.suspendHistory('Auto layout', 'commitPreparedLayout();');
-        } else activeDocument.suspendHistory('Auto layout', 'applyLayoutPlan()');
+            activeDocument.suspendHistory('Auto layout', 'commitLayout();');
+        } else activeDocument.suspendHistory('Auto layout', 'commitLayout();');
         progressStage('Restoring layer selection', function () {
             restoreLayerSelection(sourceState.layerIds, sourceState.activeLayerId);
         });
@@ -2310,7 +2310,9 @@ function getPriorityLabels() {
 }
 
 function normalizePriorityLabel(value) {
-    var token = String(value || 'off'), allowed = 'off|none|red|orange|yellowColor|grain|blue|violet|gray|magenta|fuchsia|seafoam|indigo'.split('|');
+    var token = String(value || 'off');
+    if (token == 'green') token = 'grain';
+    var allowed = 'off|none|red|orange|yellowColor|grain|blue|violet|gray|magenta|fuchsia|seafoam|indigo'.split('|');
     for (var i = 0; i < allowed.length; i++) if (token == allowed[i]) return token;
     return 'off';
 }
@@ -2340,13 +2342,16 @@ function validatePriorities() {
 
 function readLayerColorLabel(descriptor) {
     if (!descriptor.hasKey(s2t('color'))) return 'none';
-    return String(typeIDToStringID(descriptor.getEnumerationValue(s2t('color'))));
+    var value = descriptor.getEnumerationValue(s2t('color')), labels = 'none|red|orange|yellowColor|grain|blue|violet|gray|magenta|fuchsia|seafoam|indigo'.split('|');
+    for (var i = 0; i < labels.length; i++)
+        if (value == s2t(labels[i])) return labels[i];
+    return normalizePriorityLabel(typeIDToStringID(value));
 }
 
 function priorityForLabel(label) {
     var first = normalizePriorityLabel(cfg.priorityStartLabel), last = normalizePriorityLabel(cfg.priorityEndLabel);
-    if (first != 'off' && String(label || 'none') == first) return 0;
-    if (last != 'off' && String(label || 'none') == last) return 2;
+    if (first != 'off' && normalizePriorityLabel(label || 'none') == first) return 0;
+    if (last != 'off' && normalizePriorityLabel(label || 'none') == last) return 2;
     return 1;
 }
 
@@ -2364,7 +2369,7 @@ function priorityForRoots(roots) {
 
 function isTogetherLabel(label) {
     var selected = normalizePriorityLabel(cfg.togetherLabel);
-    return !alphabetOrderActive() && selected != 'off' && String(label || 'none') == selected;
+    return !alphabetOrderActive() && selected != 'off' && normalizePriorityLabel(label || 'none') == selected;
 }
 
 function togetherForRoots(roots) {
@@ -6112,6 +6117,26 @@ function rectanglesOverlap(a, b, eps) {
         a.top < b.bottom - eps && a.bottom > b.top + eps
 }
 
+function commitLayout() {
+    var document = activeDocument, channels = document.activeChannels,
+        savedSelection = document.channels.add(), selectionStored = false;
+    try {
+        document.selection.store(savedSelection);
+        selectionStored = true;
+        document.activeChannels = channels;
+        document.selection.deselect();
+        if (preparation) commitPreparedLayout();
+        else applyLayoutPlan();
+    } finally {
+        try {
+            if (selectionStored) document.selection.load(savedSelection);
+        } finally {
+            savedSelection.remove();
+            document.activeChannels = channels;
+        }
+    }
+}
+
 function applyLayoutPlan() {
     if (cfg.noEnlarge && layoutPlan && layoutPlan.commonScale > 1 + 1e-12)
         throw new Error(str.t('Увеличение слоёв запрещено.', 'Layer enlargement is disabled.'));
@@ -6889,7 +6914,10 @@ function AM(target, order) {
 
     this.transformSelection = function (scale, offsetX, offsetY) {
         var d = new AD,
-            d1 = new AD;
+            d1 = new AD,
+            r = new AR;
+        r.putEnumerated(s2t('layer'), s2t('ordinal'), s2t('targetEnum'));
+        d.putReference(s2t('null'), r);
         offsetX = isFinite(Number(offsetX)) ? Number(offsetX) : 0;
         offsetY = isFinite(Number(offsetY)) ? Number(offsetY) : 0;
         d.putEnumerated(s2t('freeTransformCenterState'), s2t('quadCenterState'), s2t('QCSAverage'));
