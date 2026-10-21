@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.54',
+const ver = '0.10.59',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -135,7 +135,7 @@ function main() {
         items = assignLabelPriorities(items);
         if (alphabetical) progressStage('Reading alphabetical names', function () {
             prepareAlphabeticalKeys(items);
-            if (cfg.alphabetOrder == 'page') items = sortAlphabeticalItems(items);
+            if (cfg.orderingScope == 'page') items = sortAlphabeticalItems(items);
         });
         genderInfo = null; headInfo = null;
         if (semanticRequested) progressStage('Analyzing photos', function () {
@@ -161,7 +161,7 @@ function main() {
             }
             return seed;
         }, 32, 55);
-        if (alphabetical && cfg.alphabetOrder == 'zone')
+        if (alphabetical && cfg.orderingScope == 'zone')
             layoutPlan = sortAlphabeticalZones(layoutPlan, selGeometry);
         if (!layoutPlan.pythonComposition) layoutPlan = arrangeTogether(layoutPlan, selGeometry);
         layoutPlan.genderSummary = genderInfo;
@@ -475,7 +475,7 @@ function buildFixedLayout(items, geometry) {
             start += packed.count;
         }
         balanceZoneRows(specs, indices, zone, scale, gx, gy,
-            getRowRhythmProfile(allocation.rowCount, cfg.rowRhythm).slice(specs.length - indices.length, specs.length));
+            getRowRhythmProfile(indices.length, cfg.rowRhythm));
         if (!placeVerticalGroup(specs, indices, scale, profile.gapY, zone.top, zone.bottom))
             throw new Error(str.t('Ряды не помещаются с зафиксированным интервалом.', 'The rows do not fit with the locked gap.'));
     }
@@ -619,8 +619,9 @@ function mainDialog(editingAction) {
         slGapMax = grGapMax.add("slider{minvalue:1,maxvalue:4,preferredSize:[255,-1]}"),
 
         pnAdditional = dlg.add("panel{orientation:'column',alignChildren:['fill','top'],spacing:8,margins:[10,18,10,10]}"),
-        dlAlphabet = pnAdditional.add('dropdownlist'),
         chPythonPacking = pnAdditional.add('checkbox'),
+        dlScope = pnAdditional.add('dropdownlist'),
+        chAlphabet = pnAdditional.add('checkbox'),
         chAlternateGender = pnAdditional.add('checkbox'),
         chHeadTurn = pnAdditional.add('checkbox'),
         stColor = pnAdditional.add('statictext', undefined, str.colorTitle),
@@ -659,7 +660,7 @@ function mainDialog(editingAction) {
     stGapXValue.alignment = stGapYValue.alignment = stGapMaxValue.alignment = ['right', 'center'];
     slGapX.alignment = slGapY.alignment = slGapMax.alignment = ['fill', 'center'];
     stPythonStatus.alignment = ['fill', 'top'];
-    dlColor.alignment = dlAlphabet.alignment = ['fill', 'center'];
+    dlColor.alignment = dlScope.alignment = ['fill', 'center'];
     grPriorityStart.alignment = grPriorityEnd.alignment = grTogether.alignment = ['fill', 'center'];
     dlPriorityStart.alignment = dlPriorityEnd.alignment = dlTogether.alignment = ['fill', 'center'];
     pnPriority.text = str.t('Приоритеты по меткам', 'Layer label priorities');
@@ -687,6 +688,8 @@ function mainDialog(editingAction) {
     dlRhythm.add('item', str.rhythmEdgesWide)
     dlRhythm.add('item', str.rhythmAlternateWide)
     dlRhythm.add('item', str.rhythmAlternateNarrow)
+    dlRhythm.add('item', str.rhythmPyramid)
+    dlRhythm.add('item', str.rhythmInvertedPyramid)
     stAlign.text = str.horizontal
     dlAlign.add('item', str.alignLeft)
     dlAlign.add('item', str.alignCenter)
@@ -696,10 +699,11 @@ function mainDialog(editingAction) {
     stGapXTitle.text = str.gapX
     stGapYTitle.text = str.gapY
     stGapMaxTitle.text = str.maxGap
-    dlAlphabet.add('item', str.alphabetOff);
-    dlAlphabet.add('item', str.alphabetPage);
-    dlAlphabet.add('item', str.alphabetZone);
-    dlAlphabet.helpTip = str.alphabetTip;
+    dlScope.add('item', str.t('Весь лист', 'Whole sheet'));
+    dlScope.add('item', str.t('Каждая зона', 'Each zone'));
+    dlScope.helpTip = str.t('Общая область для М/Д, поворота, цвета одежды и алфавитной сортировки. Фотографии подбираются из всего выбранного набора; метки начала, конца и «Рядом» действуют на весь лист.', 'Shared scope for gender, pose, clothing color and alphabetical ordering. Photos are selected from the full set; beginning, end and Together labels apply to the whole sheet.');
+    chAlphabet.text = str.t('по алфавиту', 'alphabetical order');
+    chAlphabet.helpTip = str.alphabetTip;
     chNoEnlarge.text = str.t('Не увеличивать размер слоёв', 'Do not enlarge layers');
     chNoEnlarge.helpTip = str.t('Масштаб не выше 100%. Уменьшение разрешено, увеличение запрещено. Если объекты уже помещаются, геометрический расчёт сохраняет их размер.', 'Scale is capped at 100%. Shrinking is allowed, enlargement is disabled. Geometry preserves the current sizes when they already fit.');
     chPythonPacking.text = str.pythonPacking;
@@ -718,7 +722,7 @@ function mainDialog(editingAction) {
 
     edRows.text = cfg.rows
     edRows.enabled = !cfg.autoRows
-    var rhythmValues = ['auto', 'centerWide', 'edgesWide', 'alternateWide', 'alternateNarrow'],
+    var rhythmValues = ['auto', 'centerWide', 'edgesWide', 'alternateWide', 'alternateNarrow', 'pyramid', 'invertedPyramid'],
         alignmentValues = ['left', 'center', 'right', 'justify'];
     setChoice(dlRhythm, rhythmValues, cfg.rowRhythm, 0);
     setChoice(dlAlign, alignmentValues, cfg.horizontalAlign, 1);
@@ -743,7 +747,7 @@ function mainDialog(editingAction) {
         str.pythonUnavailablePrefix + pythonAvailability.message + '\n' + str.geometryWithoutPython
     if (!stPythonStatus.visible) pnAdditional.remove(stPythonStatus);
     var checkboxSettings = [
-        [chNoEnlarge, 'noEnlarge'], [chAutoRows, 'autoRows'],
+        [chNoEnlarge, 'noEnlarge'], [chAutoRows, 'autoRows'], [chAlphabet, 'alphabetical'],
         [chPythonPacking, 'pythonPacking'], [chAlternateGender, 'alternateGender'],
         [chHeadTurn, 'considerHeadTurn'], [chGroupRows, 'groupRows'], [chLockAction, 'lockForAction']
     ];
@@ -754,14 +758,13 @@ function mainDialog(editingAction) {
     for (var cb = 0; cb < checkboxSettings.length; cb++)
         bindCheckbox(checkboxSettings[cb][0], checkboxSettings[cb][1]);
     chLockAction.onClick = function () { cfg.lockForAction = !!this.value; updateAdditionalEnabled(); };
-    dlAlphabet.selection = dlAlphabet.items[cfg.alphabetOrder == 'page' ? 1 : cfg.alphabetOrder == 'zone' ? 2 : 0];
-    dlAlphabet.enabled = true;
-    dlAlphabet.onChange = function () { readAlphabetSelection(); updateAdditionalEnabled(); };
+    dlScope.selection = dlScope.items[cfg.orderingScope == 'zone' ? 1 : 0];
+    dlScope.onChange = readScopeSelection;
+    chAlphabet.onClick = function () { cfg.alphabetical = !!this.value; updateAdditionalEnabled(); };
     updateAdditionalEnabled();
 
-    function readAlphabetSelection() {
-        var text = dlAlphabet.selection ? String(dlAlphabet.selection.text) : '';
-        cfg.alphabetOrder = text == str.alphabetPage ? 'page' : text == str.alphabetZone ? 'zone' : 'off';
+    function readScopeSelection() {
+        cfg.orderingScope = dlScope.selection == dlScope.items[1] ? 'zone' : 'page';
     }
     function updateAdditionalEnabled() {
         var normal = !alphabetOrderActive(),
@@ -838,7 +841,7 @@ function mainDialog(editingAction) {
         cfg.maxGapMultiplier = Math.max(1, Math.min(4, Math.round(Number(slGapMax.value) || 1)));
         readRhythmSelection();
         readAlignmentSelection();
-        readAlphabetSelection();
+        readScopeSelection();
         if (dlColor.selection) cfg.colorMode = colorModeFromSelection(dlColor.selection);
         if (editingAction && cfg.lockForAction && !actionProfile) {
             alert(str.lockActionRecordFirst, 'Auto layout');
@@ -928,6 +931,8 @@ function Locale() {
     this.rhythmEdgesWide = this.t('Шире к краям', 'Wider toward edges');
     this.rhythmAlternateWide = this.t('Чередование — длинный сверху', 'Alternating — long row on top');
     this.rhythmAlternateNarrow = this.t('Чередование — короткий сверху', 'Alternating — short row on top');
+    this.rhythmPyramid = this.t('Пирамида', 'Pyramid');
+    this.rhythmInvertedPyramid = this.t('Обратная пирамида', 'Inverted pyramid');
     this.horizontal = this.t('По горизонтали:', 'Horizontal:');
     this.alignLeft = this.t('По левому краю', 'Left');
     this.alignCenter = this.t('По центру', 'Center');
@@ -937,9 +942,6 @@ function Locale() {
     this.gapY = this.t('Минимальный интервал Y, %', 'Minimum gap Y, %');
     this.maxGap = this.t('Максимальное увеличение', 'Maximum increase');
     this.maxGapY = this.t('Максимальное увеличение (Y)', 'Maximum increase (Y)');
-    this.alphabetOff = this.t('Без сортировки по алфавиту', 'No alphabetical ordering');
-    this.alphabetPage = this.t('По алфавиту в пределах страницы', 'Alphabetical across the page');
-    this.alphabetZone = this.t('По алфавиту в пределах зоны', 'Alphabetical within each zone');
     this.alphabetTip = this.t('Фамилия и имя из названия слоя; номера и служебные приписки пропускаются. Нужен Python для разбора имён. Остальные дополнительные опции игнорируются.',
         'Surname and given name from the layer name; numbers and service labels are skipped. Python is required to parse names. Other additional options are ignored.');
     this.pythonPacking = this.t('рассчитывать заполнение площадок в Python', 'calculate zone packing in Python');
@@ -949,12 +951,12 @@ function Locale() {
     this.alternateGender = this.t('чередовать мальчиков и девочек', 'alternate boys and girls');
     this.headTurn = this.t('учитывать разворот тела и головы', 'consider body and head turn');
     this.headTurnTip = this.t(
-        'Поворот лица, корпус и мягкое предпочтение наклона головы к центру. Запрокидывание не считается боковым поворотом.',
-        'Face turn, body orientation, and a soft preference for head tilt toward the center. Looking up or down is not treated as a side turn.');
+        'Поворот лица, корпус и мягкое предпочтение наклона головы к центру выбранной области. Запрокидывание не считается боковым поворотом.',
+        'Face turn, body orientation, and a soft preference for head tilt toward the center of the selected scope. Looking up or down is not treated as a side turn.');
     this.colorTitle = this.t('Расстановка по цвету одежды:', 'Clothing color arrangement:');
     this.colorTip = this.t(
-        'По всему листу, включая обмены между рядами и площадками. Близкие цвета рядом или контраст соседей; схема М/Д сохраняется, близкие повороты допускают обмен.',
-        'Across the whole sheet, including swaps between rows and zones. Similar colors can be kept together or neighboring contrast maximized; the boy/girl pattern is preserved and similar poses may swap.');
+        'В выбранной области: близкие цвета рядом или контраст соседей; схема М/Д сохраняется, близкие повороты допускают обмен.',
+        'Within the selected scope: similar colors can be kept together or neighboring contrast maximized; the boy/girl pattern is preserved and similar poses may swap.');
     this.groupRows = this.t('объединять каждый ряд в группу', 'group each row');
     this.saveAction = this.t('Сохранить настройки экшена', 'Save action settings');
     this.layoutLayers = this.t('Разложить слои', 'Arrange layers');
@@ -986,7 +988,8 @@ function Config() {
     this.gapX = 6
     this.gapY = 6
     this.maxGapMultiplier = 3
-    this.alphabetOrder = 'off'
+    this.alphabetical = false
+    this.orderingScope = 'page'
     this.alternateGender = false
     this.considerHeadTurn = false
     this.colorMode = 'off'
@@ -1004,11 +1007,13 @@ function Config() {
         this.priorityEndLabel = normalizePriorityLabel(this.priorityEndLabel);
         this.togetherLabel = normalizePriorityLabel(this.togetherLabel);
         this.noEnlarge = this.noEnlarge === true;
-        this.alphabetOrder = normalizeAlphabetOrder(this.alphabetOrder);
+        this.alphabetical = this.alphabetical === true;
+        this.orderingScope = normalizeOrderingScope(this.orderingScope);
         this.colorMode = normalizeColorMode(this.colorMode);
         this.rows = Math.max(1, Math.round(Number(this.rows) || 1))
         if (this.rowRhythm != 'auto' && this.rowRhythm != 'centerWide' && this.rowRhythm != 'edgesWide' &&
-            this.rowRhythm != 'alternateWide' && this.rowRhythm != 'alternateNarrow') this.rowRhythm = 'auto'
+            this.rowRhythm != 'alternateWide' && this.rowRhythm != 'alternateNarrow' &&
+            this.rowRhythm != 'pyramid' && this.rowRhythm != 'invertedPyramid') this.rowRhythm = 'auto'
         if (this.horizontalAlign != 'left' && this.horizontalAlign != 'center' && this.horizontalAlign != 'right' && this.horizontalAlign != 'justify') this.horizontalAlign = 'center'
         this.gapX = Math.max(0, Math.min(30, Number(this.gapX) || 0))
         this.gapY = Math.max(0, Math.min(30, Number(this.gapY) || 0))
@@ -1019,7 +1024,8 @@ function Config() {
         settingsObj.priorityStartLabel = normalizePriorityLabel(settingsObj.priorityStartLabel);
         settingsObj.priorityEndLabel = normalizePriorityLabel(settingsObj.priorityEndLabel);
         settingsObj.togetherLabel = normalizePriorityLabel(settingsObj.togetherLabel);
-        settingsObj.alphabetOrder = normalizeAlphabetOrder(settingsObj.alphabetOrder);
+        settingsObj.alphabetical = settingsObj.alphabetical === true;
+        settingsObj.orderingScope = normalizeOrderingScope(settingsObj.orderingScope);
         settingsObj.colorMode = normalizeColorMode(settingsObj.colorMode);
         var d = objectToDescriptor(settingsObj);
         if (toAction) {
@@ -1053,7 +1059,7 @@ function Config() {
 
     function objectToDescriptor(o) {
         var d = new ActionDescriptor,
-            properties = ['priorityStartLabel', 'priorityEndLabel', 'togetherLabel', 'noEnlarge', 'autoRows', 'rows', 'rowRhythm', 'horizontalAlign', 'gapX', 'gapY', 'maxGapMultiplier', 'alphabetOrder', 'alternateGender', 'considerHeadTurn', 'colorMode', 'pythonPacking', 'lockForAction', 'groupRows'];
+            properties = ['priorityStartLabel', 'priorityEndLabel', 'togetherLabel', 'noEnlarge', 'autoRows', 'rows', 'rowRhythm', 'horizontalAlign', 'gapX', 'gapY', 'maxGapMultiplier', 'alphabetical', 'orderingScope', 'alternateGender', 'considerHeadTurn', 'colorMode', 'pythonPacking', 'lockForAction', 'groupRows'];
 
         for (var i = 0; i < properties.length; i++) {
             var key = properties[i],
@@ -2504,12 +2510,19 @@ function priorityOrderValid(rows) {
     return true;
 }
 
-function normalizeAlphabetOrder(value) {
-    var v = String(value || 'off');
-    return v == 'page' || v == 'zone' ? v : 'off';
-}
+function normalizeOrderingScope(value) { return value == 'zone' ? 'zone' : 'page'; }
+function alphabetOrderActive() { return !!cfg.alphabetical; }
+function orderingZone(row) { return cfg.orderingScope == 'zone' ? Number(row.zoneIndex || 0) : 0; }
+function sameOrderingScope(a, b) { return orderingZone(a) == orderingZone(b); }
 
-function alphabetOrderActive() { return normalizeAlphabetOrder(cfg.alphabetOrder) != 'off'; }
+function orderingFrames(geometry) {
+    return cfg.orderingScope == 'zone' && !geometry.isRectangle && geometry.multiZone ?
+        flattenComponentZones(geometry.components) : [geometry.bounds];
+}
+function orderingFrame(row, geometry, frames) {
+    var bounds = frames[orderingZone(row)] || geometry.bounds;
+    return { center: (bounds.left + bounds.right) / 2, half: Math.max(1, (bounds.right - bounds.left) / 2) };
+}
 
 function prepareAlphabeticalKeys(items) {
     genderPy.resetForRun();
@@ -2556,16 +2569,15 @@ function sortAlphabeticalZones(plan, geometry) {
         var group = groups[key], count = plan.rows[r].items.length;
         rows.push(group.items.slice(group.offset, group.offset + count)); group.offset += count;
     }
-    var candidate = rebuildAssignedLayout(plan, geometry, rows, true);
+    var candidate = reflowVerticalRows(plan, geometry, rows, plan.commonScale);
     if (!candidate && !plan.lockedMetrics) {
-        var low = 0, high = plan.commonScale, seed = {}, k;
-        for (k in plan) if (plan.hasOwnProperty(k)) seed[k] = plan[k];
+        var low = 0, high = plan.commonScale;
         for (i = 0; i < 28; i++) {
-            seed.commonScale = (low + high) / 2;
-            var trial = rebuildAssignedLayout(seed, geometry, rows, true);
-            if (trial) { candidate = trial; low = seed.commonScale; } else high = seed.commonScale;
+            var scale = (low + high) / 2, trial = reflowVerticalRows(plan, geometry, rows, scale);
+            if (trial) { candidate = trial; low = scale; } else high = scale;
         }
     }
+    if (candidate) candidate.autoRows = plan.autoRows;
     if (!candidate) throw new Error(str.t('Не удалось разместить алфавитный порядок с заданными размерами и интервалами.', 'Could not fit alphabetical order using the specified sizes and gaps.'));
     validateLayoutPlan(candidate, geometry);
     return candidate;
@@ -2860,20 +2872,18 @@ function paletteTone(palette) {
     return { lightness: .8 * dominant.lab[0] + .2 * l, hue: Math.atan2(b, a), chroma: .8 * Math.sqrt(dominant.lab[1] * dominant.lab[1] + dominant.lab[2] * dominant.lab[2]) + .2 * chroma };
 }
 
-function colorAssignmentCost(plan, mode, distances) {
-    mode = normalizeColorMode(mode);
-    distances = distances || {};
-    var positions = {}, physicalRows = [], rowRefs = [], total = 0, weights = 0, edges = {};
+function physicalLayoutRows(plan) {
+    var positions = {}, physicalRows = [], rowRefs = [];
     for (var pi = 0; pi < plan.placements.length; pi++) positions[String(plan.placements[pi].layerId)] = plan.placements[pi];
-    for (var r = 0; r < plan.rows.length; r++) rowRefs.push({ index: r, top: Number(plan.rows[r].y) });
-    rowRefs.sort(function (a, b) { return a.top == b.top ? a.index - b.index : a.top - b.top; });
+    for (var r = 0; r < plan.rows.length; r++) rowRefs.push({ index: r, scope: orderingZone(plan.rows[r]), top: Number(plan.rows[r].y) });
+    rowRefs.sort(function (a, b) { return (a.scope - b.scope) || (a.top - b.top) || (a.index - b.index); });
 
     for (var rr = 0; rr < rowRefs.length; rr++) {
         var ref = rowRefs[rr], group = null;
-        if (physicalRows.length && Math.abs(physicalRows[physicalRows.length - 1].top - ref.top) < 1)
+        if (physicalRows.length && physicalRows[physicalRows.length - 1].scope == ref.scope && Math.abs(physicalRows[physicalRows.length - 1].top - ref.top) < 1)
             group = physicalRows[physicalRows.length - 1];
         else {
-            group = { top: ref.top, entries: [] };
+            group = { top: ref.top, scope: ref.scope, entries: [] };
             physicalRows.push(group);
         }
         var row = plan.rows[ref.index];
@@ -2884,6 +2894,43 @@ function colorAssignmentCost(plan, mode, distances) {
     }
     for (rr = 0; rr < physicalRows.length; rr++)
         physicalRows[rr].entries.sort(function (a, b) { return a.x == b.x ? a.item.order - b.item.order : a.x - b.x; });
+
+    return physicalRows;
+}
+
+function spatialGenderStats(plan) {
+    var rows = physicalLayoutRows(plan), result = { horizontalGood: 0, horizontalBad: 0, verticalGood: 0, verticalKnown: 0 };
+    function pair(a, b, vertical) {
+        var sa = a.item.gender, sb = b.item.gender;
+        if ((sa != 'M' && sa != 'F') || (sb != 'M' && sb != 'F')) return;
+        if (vertical) { result.verticalKnown++; if (sa != sb) result.verticalGood++; }
+        else if (sa != sb) result.horizontalGood++; else result.horizontalBad++;
+    }
+    for (var r = 0; r < rows.length; r++) {
+        var current = rows[r].entries;
+        for (var i = 0; i + 1 < current.length; i++) pair(current[i], current[i + 1], false);
+        for (i = 0; i < current.length; i++) {
+            var a = current[i];
+            for (var below = r + 1; below < rows.length && rows[below].scope == rows[r].scope; below++) {
+                var nearest = null, distance = Infinity, entries = rows[below].entries;
+                for (var j = 0; j < entries.length; j++) {
+                    var b = entries[j], dx = b.x - a.x, dy = b.y - a.y;
+                    // Skip unrelated columns; an intervening zone must not hide the row below this photo.
+                    if (Math.abs(dx) > (a.item.width + b.item.width) * plan.commonScale / 2 + 1e-7) continue;
+                    var d = dx * dx + dy * dy;
+                    if (d < distance) { distance = d; nearest = b; }
+                }
+                if (nearest) { pair(a, nearest, true); break; }
+            }
+        }
+    }
+    return result;
+}
+
+function colorAssignmentCost(plan, mode, distances) {
+    mode = normalizeColorMode(mode);
+    distances = distances || {};
+    var physicalRows = physicalLayoutRows(plan), total = 0, weights = 0, edges = {}, rr;
 
     function edge(a, b, weight) {
         if (!a || !b || !a.item.colorPalette || !b.item.colorPalette) return;
@@ -2899,7 +2946,7 @@ function colorAssignmentCost(plan, mode, distances) {
     for (rr = 0; rr < physicalRows.length; rr++) {
         var current = physicalRows[rr].entries;
         for (var i = 0; i + 1 < current.length; i++) edge(current[i], current[i + 1], 1);
-        if (rr + 1 >= physicalRows.length) continue;
+        if (rr + 1 >= physicalRows.length || physicalRows[rr].scope != physicalRows[rr + 1].scope) continue;
         var below = physicalRows[rr + 1].entries;
         for (i = 0; i < current.length; i++) {
             var nearest = null, nearestDist = Infinity;
@@ -2919,30 +2966,34 @@ function betterColorOrder(cost, bestCost) {
     return cost < bestCost - 1e-8;
 }
 
-function buildColorPoseContext(baseline, geometry) {
-    var positions = {}, photos = {}, i, r, c;
+function buildColorPoseContext(baseline, geometry, frames) {
+    frames = frames || orderingFrames(geometry);
+    var positions = {}, directions = {}, i, r, c;
     for (i = 0; i < baseline.placements.length; i++)
         positions[String(baseline.placements[i].layerId)] = baseline.placements[i].targetCenterX;
-    for (r = 0; r < baseline.rows.length; r++) for (c = 0; c < baseline.rows[r].items.length; c++)
-        photos[String(baseline.rows[r].items[c].id)] = baseline.rows[r].items[c];
-    return { positions: positions, photos: photos, center: (geometry.bounds.left + geometry.bounds.right) / 2 };
+    for (r = 0; r < baseline.rows.length; r++) {
+        var frame = orderingFrame(baseline.rows[r], geometry, frames);
+        for (c = 0; c < baseline.rows[r].items.length; c++) {
+            var item = baseline.rows[r].items[c], key = String(item.id);
+            directions[key] = (frame.center - positions[key]) / frame.half;
+        }
+    }
+    return { directions: directions, frames: frames };
 }
 
 function colorPoseCompatible(candidate, baseline, geometry, context) {
     context = context || buildColorPoseContext(baseline, geometry);
-    var positions = context.positions, photos = context.photos, center = context.center;
+    var current = buildColorPoseContext(candidate, geometry, context.frames);
     for (var r = 0; r < candidate.rows.length; r++) for (var c = 0; c < candidate.rows[r].items.length; c++) {
         var item = candidate.rows[r].items[c], original = baseline.rows[r].items[c];
         if (!!item.headTurnValid != !!original.headTurnValid) return false;
         if (item.headTurnValid && Math.abs(item.headTurn - original.headTurn) > 12) return false;
         if (!!item.headLeanValid != !!original.headLeanValid) return false;
         if (item.headLeanValid && Math.abs(item.headLean - original.headLean) > 8) return false;
-    }
-    for (var i = 0; i < candidate.placements.length; i++) {
-        var placement = candidate.placements[i], photo = photos[String(placement.layerId)];
-        if (photo && photo.headTurnValid && Math.abs(photo.headTurn) >= 12 &&
-            photo.headTurn * (center - positions[String(photo.id)]) >= 0 &&
-            photo.headTurn * (center - placement.targetCenterX) < -1e-8) return false;
+        var key = String(item.id);
+        if (item.headTurnValid && Math.abs(item.headTurn) >= 12 &&
+            item.headTurn * context.directions[key] >= 0 &&
+            item.headTurn * current.directions[key] < -1e-8) return false;
     }
     return true;
 }
@@ -2971,7 +3022,7 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
             for (cc = 0; cc < plan.rows[rr].items.length; cc++) {
                 var seedItem = plan.rows[rr].items[cc];
                 if (!seedItem.colorPalette) continue;
-                var bucket = assignmentClass(seedItem) + '|' + (useGender ? String(seedItem.gender) : 'all');
+                var bucket = orderingZone(plan.rows[rr]) + '|' + assignmentClass(seedItem) + '|' + (useGender ? String(seedItem.gender) : 'all');
                 if (!pools[bucket]) { pools[bucket] = []; locations[bucket] = []; }
                 pools[bucket].push(seedItem); locations[bucket].push({ row: rr, col: cc });
             }
@@ -3427,16 +3478,17 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
 
 function semanticScore(plan, geometry, useGender, useHead) {
     var stats = useGender ? genderStats(plan) : {}, centerPenalty = stats.minorityCenterPenalty, headCost = 0, smoothCost = 0, leanCost = 0,
-        center = (geometry.bounds.left + geometry.bounds.right) / 2, half = Math.max(1, geometry.bounds.width / 2),
+        frames = useHead ? orderingFrames(geometry) : [],
         positions = {}, r, c;
     if (useHead) for (var i = 0; i < plan.placements.length; i++) positions[String(plan.placements[i].layerId)] = plan.placements[i].targetCenterX;
     for (r = 0; r < plan.rows.length; r++) {
         var items = plan.rows[r].items, previous = null;
         if (!useHead) continue;
+        var frame = orderingFrame(plan.rows[r], geometry, frames);
         for (c = 0; c < items.length; c++) {
             var item = items[c];
             if (!item.headTurnValid) { previous = null; continue; }
-            var turn = item.headTurn / 80, desired = (center - positions[String(item.id)]) / half, delta = turn - desired;
+            var turn = item.headTurn / 80, desired = (frame.center - positions[String(item.id)]) / frame.half, delta = turn - desired;
             headCost += delta * delta;
             if (item.headLeanValid) {
                 var leanDelta = item.headLean / 30 - desired;
@@ -3487,14 +3539,14 @@ function optimizeSemantics(plan, geometry, useGender, useHead) {
         return candidate;
     }
     function sortedEqualSizeRows(p) {
-        var rows = copyRows(p), buckets = {}, position = {}, rr, cc;
+        var rows = copyRows(p), buckets = {}, position = {}, frames = orderingFrames(geometry), rr, cc;
         for (var i = 0; i < p.placements.length; i++) position[String(p.placements[i].layerId)] = p.placements[i].targetCenterX;
         for (rr = 0; rr < rows.length; rr++) for (cc = 0; cc < rows[rr].length; cc++) {
             var item = rows[rr][cc];
             if (!item.headTurnValid) continue;
             var key = assignmentClass(item) + '|' + (useGender ? item.gender : 'any') + '|' + item.width.toFixed(6) + '|' + item.height.toFixed(6);
             if (!buckets[key]) buckets[key] = [];
-            buckets[key].push({ row: rr, column: cc, item: item, x: position[String(item.id)] });
+            buckets[key].push({ row: rr, column: cc, item: item, x: (position[String(item.id)] - orderingFrame(p.rows[rr], geometry, frames).center) / orderingFrame(p.rows[rr], geometry, frames).half });
         }
         for (key in buckets) {
             if (!buckets.hasOwnProperty(key)) continue;
@@ -3525,13 +3577,17 @@ function optimizeSemantics(plan, geometry, useGender, useHead) {
         if (useGender) {
             var allItems = [];
             for (var gr = 0; gr < baseRows.length; gr++) allItems = allItems.concat(baseRows[gr]);
-            var globalOrder = sortGenderCheckerboard(allItems, plan.distribution), globalRows = [], offset = 0;
-            for (gr = 0; gr < plan.distribution.length; gr++) {
-                globalRows.push(globalOrder.slice(offset, offset + plan.distribution[gr]));
-                offset += plan.distribution[gr];
+            var genderOrders = [sortGenderCheckerboard(allItems, plan.distribution)];
+            if (cfg.orderingScope == 'zone') genderOrders.push(sortGenderCheckerboard(allItems, plan.distribution, plan.rows));
+            for (var go = 0; go < genderOrders.length; go++) {
+                var globalRows = [], offset = 0;
+                for (gr = 0; gr < plan.distribution.length; gr++) {
+                    globalRows.push(genderOrders[go].slice(offset, offset + plan.distribution[gr]));
+                    offset += plan.distribution[gr];
+                }
+                var globalTrial = consider(globalRows);
+                if (useHead && globalTrial) consider(sortedEqualSizeRows(globalTrial));
             }
-            var globalTrial = consider(globalRows);
-            if (useHead && globalTrial) consider(sortedEqualSizeRows(globalTrial));
         }
         if (useHead) consider(sortedEqualSizeRows(best));
         for (r = 0; useGender && r < baseRows.length; r++) {
@@ -3558,11 +3614,11 @@ function optimizeSemantics(plan, geometry, useGender, useHead) {
         if ((useGender || useHead) && slots.length > 80) {
             var rankPositions = {}, ranked = slots.slice(0), searchSlots = [];
             for (var pi = 0; pi < best.placements.length; pi++) rankPositions[String(best.placements[pi].layerId)] = best.placements[pi].targetCenterX;
-            var cx = (geometry.bounds.left + geometry.bounds.right) / 2, hw = Math.max(1, geometry.bounds.width / 2);
+            var frames = orderingFrames(geometry);
             ranked.sort(function (a, b) {
                 var ai = baseRows[a.row][a.column], bi = baseRows[b.row][b.column],
-                    da = ai.headTurnValid ? ai.headTurn / 80 - (cx - rankPositions[String(ai.id)]) / hw : 0,
-                    db = bi.headTurnValid ? bi.headTurn / 80 - (cx - rankPositions[String(bi.id)]) / hw : 0;
+                    da = ai.headTurnValid ? ai.headTurn / 80 - (orderingFrame(best.rows[a.row], geometry, frames).center - rankPositions[String(ai.id)]) / orderingFrame(best.rows[a.row], geometry, frames).half : 0,
+                    db = bi.headTurnValid ? bi.headTurn / 80 - (orderingFrame(best.rows[b.row], geometry, frames).center - rankPositions[String(bi.id)]) / orderingFrame(best.rows[b.row], geometry, frames).half : 0;
                 return db * db - da * da;
             });
             for (var si = 0; si < 24; si++) searchSlots.push(ranked[si]);
@@ -3615,8 +3671,11 @@ function buildGenderLayout(items, geometry) {
     if (!seedPlan) return null;
 
     if (seedPlan.pythonPacking || seedPlan.lockedMetrics) return seedPlan;
+    seedPlan.genderCheckerboard = genderStats(seedPlan);
+    seedPlan.genderPasses = 0;
     var distribution = seedPlan.distribution.slice(0),
-        best = null,
+        reference = Math.max(seedPlan.commonScale, seedPlan.verticalReferenceScale || 0),
+        candidates = [seedPlan], best = null,
         previousSignature = '',
         pass;
 
@@ -3636,23 +3695,36 @@ function buildGenderLayout(items, geometry) {
         candidate.genderCheckerboard = stats;
         candidate.genderPasses = pass + 1;
 
-        if (!best || isBetterGenderPlan(candidate, best)) best = candidate;
+        reference = Math.max(reference, candidate.commonScale, candidate.verticalReferenceScale || 0);
+        candidates.push(candidate);
         if (signature == previousSignature || arraysEqual(candidate.distribution, distribution)) break;
 
         previousSignature = signature;
         distribution = candidate.distribution.slice(0);
     }
 
-    if (!best) {
-        seedPlan.genderCheckerboard = genderStats(seedPlan);
-        seedPlan.genderPasses = 0;
-        return seedPlan;
+    var minimum = reference * (1 - COMPOSITION_MAX_SCALE_LOSS);
+    for (var ci = 0; ci < candidates.length; ci++) {
+        var contender = candidates[ci];
+        if (contender.commonScale >= minimum - 1e-9 && (!best || isBetterGenderPlan(contender, best))) best = contender;
     }
+    if (!best) throw new Error(str.t('Не удалось сохранить допустимый масштаб при подборе М/Д.', 'Could not preserve the permitted scale while arranging genders.'));
+    best.compositionReferenceScale = reference;
     return best;
 }
 
 
-function sortGenderCheckerboard(items, distribution) {
+function sortGenderCheckerboard(items, distribution, rows) {
+    if (cfg.orderingScope == 'zone' && rows) {
+        var scoped = [], offset = 0, startRow = 0;
+        while (startRow < rows.length) {
+            var endRow = startRow + 1, size = distribution[startRow];
+            while (endRow < rows.length && sameOrderingScope(rows[startRow], rows[endRow])) size += distribution[endRow++];
+            scoped = scoped.concat(sortGenderCheckerboard(items.slice(offset, offset + size), distribution.slice(startRow, endRow)));
+            offset += size; startRow = endRow;
+        }
+        return scoped;
+    }
     var uniform = true;
     for (var u = 1; u < items.length; u++) if (assignmentClass(items[u]) != assignmentClass(items[0])) { uniform = false; break; }
     if (uniform) return reorderGenderPool(items, distribution);
@@ -4040,8 +4112,13 @@ function planMinorityPenalty(plan) {
 }
 
 function genderStats(plan) {
-    var result = evaluateGenderRows(plan && plan.rows ? plan.rows : []),
-        known = result.known,
+    var result = evaluateGenderRows(plan && plan.rows ? plan.rows : []);
+    if (plan && plan.placements) {
+        var spatial = spatialGenderStats(plan);
+        result.horizontalGood = spatial.horizontalGood; result.horizontalBad = spatial.horizontalBad;
+        result.verticalKnown = spatial.verticalKnown; result.verticalGood = spatial.verticalGood;
+    }
+    var known = result.known,
         matched = result.matched,
         mismatched = result.mismatched,
         unknown = result.unknown,
@@ -4110,8 +4187,8 @@ function evaluateGenderRows(rows) {
         for (s = 0; s < starts.length; s++) {
             var start = starts[s],
                 rs = rowStats(rows[rowIndex].items || [], start),
-                next = rec(rowIndex + 1, start),
-                overlap = rowIndex > 0 ? Math.min(distribution[rowIndex - 1], distribution[rowIndex]) : 0,
+                next = rec(rowIndex + 1, rowIndex + 1 < rows.length && sameOrderingScope(rows[rowIndex], rows[rowIndex + 1]) ? start : ''),
+                overlap = rowIndex > 0 && sameOrderingScope(rows[rowIndex - 1], rows[rowIndex]) ? Math.min(distribution[rowIndex - 1], distribution[rowIndex]) : 0,
                 verticalGood = next.verticalGood,
                 verticalKnown = next.verticalKnown,
                 candidate;
@@ -4139,7 +4216,7 @@ function evaluateGenderRows(rows) {
     result.verticalKnown = 0;
     result.verticalGood = 0;
     for (r = 0; r < rows.length; r++) {
-        var current = rows[r].items || [], previous = r > 0 ? (rows[r - 1].items || []) : [];
+        var current = rows[r].items || [], previous = r > 0 && sameOrderingScope(rows[r - 1], rows[r]) ? (rows[r - 1].items || []) : [];
         result.horizontalGood += rowStats(current, result.rowStarts[r]).horizontalGood;
         for (var c = 0; c < Math.min(current.length, previous.length); c++) {
             var a = current[c].gender, b = previous[c].gender;
@@ -4155,7 +4232,7 @@ function evaluateGenderRows(rows) {
 
 function isBetterGenderPlan(candidate, current) {
     if (cfg.rowRhythm != 'auto') {
-        var shapeOrder = compareRowScores(getVerticalRowScore(candidate.distribution, cfg.rowRhythm), getVerticalRowScore(current.distribution, cfg.rowRhythm));
+        var shapeOrder = compareRowScores(getPlanRowScore(candidate, cfg.rowRhythm), getPlanRowScore(current, cfg.rowRhythm));
         if (shapeOrder) return shapeOrder < 0;
     }
     var a = candidate.genderCheckerboard || genderStats(candidate),
@@ -4402,7 +4479,7 @@ function placeVerticalGroup(rowSpecs, indices, commonScale, gapY, top, bottom) {
 
     var layoutHeight = rowsHeight + gapY * Math.max(0, indices.length - 1),
         available = bottom - top;
-    if (layoutHeight > available + FIT_EPS) return false;
+    if (layoutHeight > available + 0.0000001) return false;
 
     var y = top + (available - layoutHeight) / 2;
     for (i = 0; i < indices.length; i++) {
@@ -4416,6 +4493,7 @@ function placeVerticalGroup(rowSpecs, indices, commonScale, gapY, top, bottom) {
 function placeRangeVerticalGroup(rowSpecs, indices, commonScale, gapY, top, bottom) {
     if (indices.length == 1) {
         var single = rowSpecs[indices[0]];
+        if (single.allowedTopMax < single.allowedTopMin - 0.0000001) return false;
         single.top = single.allowedTopMin + (single.allowedTopMax - single.allowedTopMin) / 2;
         return true;
     }
@@ -4436,7 +4514,7 @@ function placeRangeVerticalGroup(rowSpecs, indices, commonScale, gapY, top, bott
         if (hi < startMax) startMax = hi;
     }
 
-    if (startMax < startMin - FIT_EPS) return false;
+    if (startMax < startMin - 0.0000001) return false;
     if (startMax < startMin) startMax = startMin;
 
     var totalHeight = cumulative[indices.length - 1] +
@@ -4553,7 +4631,7 @@ function finalizeLayoutRows(rowSpecs, commonScale, baseGapX, baseGapY, actualGap
         maxGapMultiplier: cfg.maxGapMultiplier,
         horizontalAlign: cfg.horizontalAlign,
         rowRhythm: cfg.rowRhythm,
-        rhythmPenalty: metadata.rhythmPenalty != undefined ? metadata.rhythmPenalty : getRowRhythmPenalty(distribution, cfg.rowRhythm),
+        rhythmPenalty: metadata.rhythmPenalty != undefined ? metadata.rhythmPenalty : getZonedRhythmPenalty(rows, cfg.rowRhythm),
         layoutWidth: maxFinalRowWidth,
         layoutHeight: metadata.layoutHeight != undefined ? metadata.layoutHeight : Math.max(0, maxBottom - minTop),
         scaleX: metadata.scaleX != undefined ? metadata.scaleX : commonScale,
@@ -4713,7 +4791,7 @@ function compositionQuality(plan) {
         excess += Math.max(0, hi - lo - 2);
         imbalance += squares - total * total / local.length;
     }
-    if (cfg.rowRhythm != 'auto') return [singles, excess].concat(getVerticalRowScore(counts, cfg.rowRhythm));
+    if (cfg.rowRhythm != 'auto') return [singles, excess].concat(getPlanRowScore(plan, cfg.rowRhythm));
     return [singles, excess, imbalance, getRowRhythmPenalty(counts, cfg.rowRhythm)];
 }
 
@@ -4804,6 +4882,7 @@ function tryPythonZoneLayout(items, geometry, baseGapX, baseGapY, seedPlan) {
         if (composition) {
             payload.useGender = !!cfg.alternateGender; payload.useHead = !!cfg.considerHeadTurn;
             payload.colorMode = normalizeColorMode(cfg.colorMode);
+            payload.orderingScope = cfg.orderingScope;
             if (seedPlan && geometry.isRectangle) {
                 payload.seedRows = [];
                 for (i = 0; i < seedPlan.rows.length; i++) {
@@ -5064,7 +5143,7 @@ function buildMultiZoneLayout(items, geometry, baseGapX, baseGapY) {
     for (var vg = 0; vg < verticalGroups.length; vg++) {
         var group = verticalGroups[vg];
         balanceZoneRows(rowSpecs, group.rowIndices, zones[group.zoneIndex], commonScale, baseGapX, baseGapY,
-            getRowRhythmProfile(rowSpecs.length, cfg.rowRhythm).slice(group.rowIndices[0], group.rowIndices[0] + group.rowIndices.length));
+            getRowRhythmProfile(group.rowIndices.length, cfg.rowRhythm));
     }
     var vertical = resolveVerticalLayout(rowSpecs, verticalGroups, commonScale, baseGapY);
     if (!vertical) return null;
@@ -5174,7 +5253,7 @@ function findMultiZoneAllocation(items, zones, scale, baseGapX, baseGapY, cache,
                     usedComponentCount: newUsedComponentCount,
                     componentSignature: signature,
                     distribution: combinedDistribution,
-                    rhythmPenalty: getRowRhythmPenalty(combinedDistribution, cfg.rowRhythm),
+                    rhythmPenalty: (state.rhythmPenalty || 0) + getRowRhythmPenalty(optionDistribution, cfg.rowRhythm),
                     assignments: state.assignments.concat([{
                         zoneIndex: z,
                         start: state.itemIndex,
@@ -5579,7 +5658,7 @@ function getFastRowTopRanges(geometry, rowHeight, requiredWidth) {
         ranges = [],
         i;
 
-    if (high < low - FIT_EPS) return ranges
+    if (high < low - 0.0000001) return ranges
     if (high < low) high = low
 
     pushUniqueNumber(events, low, 0.001)
@@ -5685,6 +5764,46 @@ function compareRowScores(a, b) {
     return 0;
 }
 
+function zoneRowScore(groups, mode) {
+    var total = 0, flat = [], i, j;
+    for (i = 0; i < groups.length; i++) for (j = 0; j < groups[i].length; j++) { total += groups[i][j]; flat.push(groups[i][j]); }
+    if (mode == 'auto') return getVerticalRowScore(flat, mode);
+    var pyramid = mode == 'pyramid' || mode == 'invertedPyramid',
+        mirrorCount = pyramid ? 1 : Math.floor(total / 2), result = [];
+    for (i = 0; i < 6 + mirrorCount; i++) result[i] = 0;
+    for (i = 0; i < groups.length; i++) {
+        // A one-row zone has no vertical rhythm to constrain.
+        if (groups[i].length <= 1) continue;
+        var score = getVerticalRowScore(groups[i], mode);
+        for (j = 0; j < 4; j++) result[j] += score[j];
+        for (j = 4; j < score.length - 2; j++) result[j] += score[j];
+        result[4 + mirrorCount] += score[score.length - 2];
+        result[5 + mirrorCount] += score[score.length - 1];
+    }
+    return result;
+}
+
+function getZonedRhythmPenalty(rows, mode) {
+    var groups = {}, value = 0;
+    for (var r = 0; r < rows.length; r++) {
+        var key = String(rows[r].zoneIndex == undefined ? 0 : rows[r].zoneIndex);
+        if (!groups[key]) groups[key] = [];
+        groups[key].push(rows[r].items.length);
+    }
+    for (var key in groups) if (groups.hasOwnProperty(key)) value += getRowRhythmPenalty(groups[key], mode);
+    return value;
+}
+
+function getPlanRowScore(plan, mode) {
+    var groups = {}, counts = [];
+    for (var r = 0; r < plan.rows.length; r++) {
+        var key = String(plan.rows[r].zoneIndex == undefined ? 0 : plan.rows[r].zoneIndex);
+        if (!groups[key]) { groups[key] = []; counts.push(groups[key]); }
+        groups[key].push(plan.rows[r].items.length);
+    }
+    return zoneRowScore(counts, mode);
+}
+
 function getVerticalRowScore(counts, mode) {
     var n = counts.length, total = 0, squares = 0, lo = 1e100, hi = 0, singles = 0,
         violations = 0, severity = 0, mirror = [], tie = 0, i;
@@ -5700,7 +5819,9 @@ function getVerticalRowScore(counts, mode) {
     var profile = getRowRhythmProfile(n, mode), middle = (n - 1) / 2;
     for (i = 1; i < n; i++) {
         var delta = counts[i] - counts[i - 1], wrong = 0;
-        if (mode == 'alternateWide' || mode == 'alternateNarrow') {
+        if (mode == 'pyramid' || mode == 'invertedPyramid') {
+            wrong = Math.max(0, mode == 'pyramid' ? -delta : delta);
+        } else if (mode == 'alternateWide' || mode == 'alternateNarrow') {
             var wantsMore = (i % 2 == 0) == (mode == 'alternateWide');
             wrong = Math.max(0, 1 - (wantsMore ? delta : -delta));
         } else {
@@ -5712,19 +5833,28 @@ function getVerticalRowScore(counts, mode) {
         if (wrong > 0) { violations++; severity += wrong; }
     }
     for (i = 0; i < n; i++) tie -= counts[i] * profile[i];
+    if (mode == 'pyramid' || mode == 'invertedPyramid') {
+        var shape = 0, average = total / n;
+        for (i = 0; i < n; i++) {
+            var difference = counts[i] - average - (profile[i] - 0.5) * 2;
+            shape += difference * difference;
+        }
+        return [excess, singles, violations, severity, shape, variance, tie];
+    }
     return [excess, singles, violations, severity].concat(mirror, [variance, tie]);
 }
 
-function improveVerticalCounts(counts, mode, feasible, tick) {
+function improveVerticalCounts(counts, mode, feasible, tick, scoreCounts) {
     if (mode == 'auto' || counts.length <= 1) return counts.slice(0);
-    var best = counts.slice(0), score = getVerticalRowScore(best, mode), n = counts.length;
+    var best = counts.slice(0), evaluate = scoreCounts || function (value) { return getVerticalRowScore(value, mode); },
+        score = evaluate(best), n = counts.length;
     for (var pass = 0; pass < Math.min(12, n * 2); pass++) {
         if (tick) tick();
         var next = best, nextScore = score;
         for (var a = 0; a < n; a++) if (best[a] > 1) for (var b = 0; b < n; b++) {
             if (a == b) continue;
             var trial = best.slice(0); trial[a]--; trial[b]++;
-            var quality = getVerticalRowScore(trial, mode);
+            var quality = evaluate(trial);
             if (compareRowScores(quality, nextScore) < 0 && (!feasible || feasible(trial))) {
                 next = trial; nextScore = quality;
             }
@@ -5788,17 +5918,28 @@ function refineVerticalLayout(plan, geometry) {
         seed.commonScale = scale;
         return reflowVerticalRows(seed, geometry, assigned, scale);
     }
-    var total = 0;
-    for (i = 0; i < initial.length; i++) total += initial[i];
-    var preferred = preferredRows(total, initial.length, cfg.rowRhythm), start = initial;
-    if (compareRowScores(getVerticalRowScore(preferred, cfg.rowRhythm), getVerticalRowScore(initial, cfg.rowRhythm)) < 0 && rebuild(preferred, minimum)) start = preferred;
+    function localScore(counts) {
+        var localGroups = [];
+        for (var k in groups) if (groups.hasOwnProperty(k)) {
+            var values = [], indices = groups[k].indices;
+            for (var r = 0; r < indices.length; r++) values.push(counts[indices[r]]);
+            localGroups.push(values);
+        }
+        return zoneRowScore(localGroups, cfg.rowRhythm);
+    }
+    var preferred = initial.slice(0), start = initial;
+    for (var groupKey in groups) if (groups.hasOwnProperty(groupKey)) {
+        var local = groups[groupKey], localPreferred = preferredRows(local.items.length, local.indices.length, cfg.rowRhythm);
+        for (i = 0; i < local.indices.length; i++) preferred[local.indices[i]] = localPreferred[i];
+    }
+    if (compareRowScores(localScore(preferred), localScore(initial)) < 0 && rebuild(preferred, minimum)) start = preferred;
     var bestPlan = null,
         result = improveVerticalCounts(start, cfg.rowRhythm, function (counts) {
             var candidate = rebuild(counts, minimum);
             if (!candidate) return false;
             bestPlan = candidate; return true;
-        }, function () { progress(progressValue, 'Refining vertical row shape...'); });
-    if (compareRowScores(getVerticalRowScore(result, cfg.rowRhythm), getVerticalRowScore(initial, cfg.rowRhythm)) >= 0) return plan;
+        }, function () { progress(progressValue, 'Refining vertical row shape...'); }, localScore);
+    if (compareRowScores(localScore(result), localScore(initial)) >= 0) return plan;
     bestPlan = rebuild(result, minimum);
     if (!bestPlan) return plan;
     var high = reference, low = minimum, exact = rebuild(result, high);
@@ -5842,6 +5983,11 @@ function getRowRhythmProfile(rows, mode) {
     if (rows <= 0) return out;
     if (mode == 'auto' || rows == 1) {
         for (i = 0; i < rows; i++) out[i] = 0;
+        return out;
+    }
+
+    if (mode == 'pyramid' || mode == 'invertedPyramid') {
+        for (i = 0; i < rows; i++) out[i] = mode == 'pyramid' ? i / (rows - 1) : 1 - i / (rows - 1);
         return out;
     }
 
@@ -5991,6 +6137,20 @@ function validateLayoutPlan(plan, geometry) {
             if (row.items.length > 1 && Math.abs(row.gapX - actionProfile.gapX) > 1e-7)
                 throw new Error(str.t('Изменился X-интервал экшена.', 'The action X gap has changed.'));
         }
+    }
+    if (!plan.lockedMetrics) {
+        var minX = plan.baseGapX * plan.commonScale, minY = plan.baseGapY * plan.commonScale,
+            gapZones = {}, hasVerticalGap = false;
+        for (var gr = 0; gr < plan.rows.length; gr++) {
+            var gapRow = plan.rows[gr], gapZone = String(gapRow.zoneIndex == undefined ? 0 : gapRow.zoneIndex);
+            if (gapZones[gapZone]) hasVerticalGap = true;
+            gapZones[gapZone] = true;
+            if (gapRow.items.length > 1 && (gapRow.gapX < minX - 0.05 ||
+                (cfg.horizontalAlign != 'justify' && gapRow.gapX > minX * cfg.maxGapMultiplier + 0.05)))
+                throw new Error(str.t('Нарушены заданные пределы X-интервала.', 'The configured X gap limits were violated.'));
+        }
+        if (hasVerticalGap && (plan.actualGapY < minY - 0.05 || plan.actualGapY > minY * cfg.maxGapMultiplier + 0.05))
+            throw new Error(str.t('Нарушены заданные пределы Y-интервала.', 'The configured Y gap limits were violated.'));
     }
     var eps = 0.05, seenIds = {}, sourceIds = {};
     for (var si = 0; si < sourceState.layerIds.length; si++) sourceIds[String(sourceState.layerIds[si])] = true;
