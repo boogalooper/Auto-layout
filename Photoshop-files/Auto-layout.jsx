@@ -18,7 +18,7 @@
 
 $.localize = true;
 
-const ver = '0.10.59',
+const ver = '0.10.60',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -57,8 +57,6 @@ var s2t = stringIDToTypeID,
     preparation = null,
     preparedItems = null,
     selGeometry = null,
-    genderInfo = null,
-    headInfo = null,
     previews = [],
     previewWork = null,
     actionMode = false,
@@ -137,16 +135,14 @@ function main() {
             prepareAlphabeticalKeys(items);
             if (cfg.orderingScope == 'page') items = sortAlphabeticalItems(items);
         });
-        genderInfo = null; headInfo = null;
         if (semanticRequested) progressStage('Analyzing photos', function () {
             analysis = analyzeSemantics(items);
-            genderInfo = analysis.gender; headInfo = analysis.headTurn;
             if (analysis.previewHistoryTouched) {
                 refreshLayerRefs(items);
                 restoreLayerSelection(sourceState.layerIds, sourceState.activeLayerId);
             }
-            useGender = !!(genderInfo && !genderInfo.fallbackToGeometry);
-            useHead = !!(headInfo && !headInfo.fallbackToGeometry);
+            useGender = analysis.useGender;
+            useHead = analysis.useHead;
         }, 30, 32);
         layoutPlan = progressStage('Calculating selection packing', function () {
             if (cfg.noEnlarge && cfg.pythonPacking && !fixedLayoutActive() && !alphabetOrderActive()) {
@@ -164,9 +160,8 @@ function main() {
         if (alphabetical && cfg.orderingScope == 'zone')
             layoutPlan = sortAlphabeticalZones(layoutPlan, selGeometry);
         if (!layoutPlan.pythonComposition) layoutPlan = arrangeTogether(layoutPlan, selGeometry);
-        layoutPlan.genderSummary = genderInfo;
         if (semanticRequested) progressStage('Semantic ordering', function () {
-            var useColor = !!(analysis.color && !analysis.color.fallbackToGeometry),
+            var useColor = analysis.useColor,
                 joint = !!layoutPlan.pythonComposition,
                 phases = (useGender || useHead || joint ? 1 : 0) + (useColor && !joint ? 1 : 0), phase = 0;
             if (useGender || useHead || joint) {
@@ -174,13 +169,11 @@ function main() {
                 layoutPlan = optimizeComposition(layoutPlan, selGeometry, useGender, useHead, useColor);
                 unitProgress(1, 1, 'Gender and pose ordering complete');
             }
-            layoutPlan.headTurnSummary = headInfo;
             if (useColor && !joint) {
                 setProgressRange(phase++ / phases, 1 / phases);
                 layoutPlan = optimizeColorAssignment(layoutPlan, selGeometry, useGender, useHead, cfg.colorMode);
                 unitProgress(1, 1, 'Color ordering complete');
             }
-            layoutPlan.colorSummary = analysis.color;
         });
         if (cfg.lockForAction && !fixedLayoutActive()) {
             actionProfile = getLayoutProfile(layoutPlan);
@@ -321,15 +314,6 @@ function updateFolder() {
     if (!environment.exists) return null;
     var folder = new Folder(environment.fsName + '/updates');
     if (!folder.exists && !folder.create()) return null;
-    var previous = new Folder(local + '/JazzyScripts/AutoLayoutUpdates');
-    if (previous.exists) {
-        var names = ['settings.json', 'checked.json', 'release.json', 'release.url'];
-        for (var i = 0; i < names.length; i++) {
-            var source = new File(previous.fsName + '/' + names[i]), destination = new File(folder.fsName + '/' + names[i]);
-            if (source.exists && (destination.exists || source.copy(destination.fsName))) source.remove();
-        }
-        previous.remove();
-    }
     return folder;
 }
 
@@ -2586,8 +2570,6 @@ function sortAlphabeticalZones(plan, geometry) {
 function applyHeadTurnResult(target, headResult) {
     target.headTurnValid = headResult.analysis_status == 'ok';
     target.headTurn = target.headTurnValid ? Number(headResult.turn) : 0;
-    target.headTurnReason = headResult.reason || '';
-    target.headTurnByBody = headResult.method == 'body_head_combined';
     target.headLeanValid = target.headTurnValid && headResult.head_status != 'uncertain' &&
         typeof headResult.roll_degrees == 'number' && isFinite(headResult.roll_degrees) &&
         typeof headResult.pitch_degrees == 'number' && isFinite(headResult.pitch_degrees);
@@ -2633,7 +2615,6 @@ function analyzeSemantics(items) {
         items[i].colorPalette = null;
         items[i].headTurnValid = false;
         items[i].headTurn = 0;
-        items[i].headTurnReason = '';
         items[i].headLeanValid = false;
         items[i].headLean = 0;
         items[i].headLeanWeight = 0;
@@ -2709,10 +2690,8 @@ function analyzeSemantics(items) {
                     }
                     if (!call.ok) {
                         imageEmptyStreak = 0;
-                        if (other) other.recordPhotoFailure(call.reason || 'python_error', call.message);
-                        if (needColor && driver != colorPy) colorPy.recordPhotoFailure(call.reason || 'python_error', call.message);
-                        if (needHead) target.headTurnReason = call.reason || 'python_error';
-                        if (needGender) target.genderReason = call.reason || 'python_error';
+                        if (other) other.recordFailure(call.reason || 'python_error', call.message);
+                        if (needColor && driver != colorPy) colorPy.recordFailure(call.reason || 'python_error', call.message);
                         continue;
                     }
                     var answer = call.value,
@@ -2726,8 +2705,7 @@ function analyzeSemantics(items) {
                             genderOutcome = classifyAnalysisResult(genderResult);
                         if (genderOutcome.failure) {
                             semanticResultFailure = true;
-                            genderPy.recordPhotoFailure(genderOutcome.reason, genderOutcome.message);
-                            target.genderReason = genderOutcome.reason;
+                            genderPy.recordFailure(genderOutcome.reason, genderOutcome.message);
                         } else {
                             genderPy.recordSuccess();
                             applyGenderResult(target, genderResult);
@@ -2739,7 +2717,7 @@ function analyzeSemantics(items) {
                         var colorResult = validEnvelope ? answer.color : null, colorOutcome = classifyColorOutcome(colorResult);
                         if (colorOutcome.failure) {
                             semanticResultFailure = true;
-                            colorPy.recordPhotoFailure(colorOutcome.reason, colorOutcome.message);
+                            colorPy.recordFailure(colorOutcome.reason, colorOutcome.message);
                         } else {
                             colorPy.recordSuccess();
                             if (colorResult.analysis_status == 'ok') {
@@ -2754,8 +2732,7 @@ function analyzeSemantics(items) {
                             headOutcome = classifyHeadTurnOutcome(headResult);
                         if (headOutcome.failure) {
                             semanticResultFailure = true;
-                            headPy.recordPhotoFailure(headOutcome.reason, headOutcome.message);
-                            target.headTurnReason = headOutcome.reason;
+                            headPy.recordFailure(headOutcome.reason, headOutcome.message);
                         } else {
                             headPy.recordSuccess();
                             applyHeadTurnResult(target, headResult);
@@ -2770,11 +2747,9 @@ function analyzeSemantics(items) {
                     if (e.number == 8007 || e.autoLayoutRestoreFailure) throw e;
                     var message = e.message ? e.message : String(e);
                     imageEmptyStreak = 0;
-                    if (needGender) genderPy.recordPhotoFailure('preview_error', message);
-                    if (needHead) headPy.recordPhotoFailure('preview_error', message);
-                    if (needColor) colorPy.recordPhotoFailure('preview_error', message);
-                    if (needHead) target.headTurnReason = 'preview_error';
-                    if (needGender) target.genderReason = 'preview_error';
+                    if (needGender) genderPy.recordFailure('preview_error', message);
+                    if (needHead) headPy.recordFailure('preview_error', message);
+                    if (needColor) colorPy.recordFailure('preview_error', message);
                 } finally {
                     if (previewPath && !removePreview(previewPath)) {
                         try { py.cleanup(previewPath); } catch (cleanupError) { }
@@ -2796,11 +2771,16 @@ function analyzeSemantics(items) {
         if (message && !arrayContains(failureMessages, message)) failureMessages.push(message);
     }
     progress(32, 'Analysis complete');
+    var knownGender = 0, knownColors = 0;
+    for (i = 0; i < items.length; i++) {
+        if (items[i].gender == 'M' || items[i].gender == 'F') knownGender++;
+        if (items[i].colorPalette) knownColors++;
+    }
     return {
         failureMessage: failureMessages.join('\n'),
-        gender: cfg.alternateGender ? finalizeGenderSummary(items, !genderReady || genderPy.isDisabled()) : null,
-        headTurn: cfg.considerHeadTurn ? finalizeHeadTurnSummary(items, !headReady || headPy.isDisabled()) : null,
-        color: colorRequested ? finalizeColorSummary(items) : null,
+        useGender: !!(cfg.alternateGender && knownGender),
+        useHead: !!(cfg.considerHeadTurn && headReady && !headPy.isDisabled()),
+        useColor: !!(colorRequested && knownColors >= 2),
         previewHistoryTouched: previewHistoryTouched
     };
 }
@@ -2839,13 +2819,6 @@ function classifyColorOutcome(result) {
         sum += p[i].weight;
     }
     return { failure: Math.abs(sum - 1) > .01, reason: 'color_invalid' };
-}
-
-function finalizeColorSummary(items) {
-    var known = 0;
-    for (var i = 0; i < items.length; i++) if (items[i].colorPalette) known++;
-    return { known: known, unknown: items.length - known, fallbackToGeometry: known < 2,
-        mode: cfg.colorMode, pythonMessage: colorPy.getState().message };
 }
 
 function paletteDistance(a, b) {
@@ -3079,7 +3052,6 @@ function optimizeColorAssignment(plan, geometry, useGender, useHead, mode) {
     }
     validateLayoutPlan(best, geometry);
     if (best == plan) { best = {}; for (var key in plan) if (plan.hasOwnProperty(key)) best[key] = plan[key]; }
-    best.headTurnSummary = plan.headTurnSummary;
     best.semanticAssignment = semanticScore(best, geometry, useGender, useHead);
     if (plan.headTurnOrdering) {
         best.headTurnOrdering = {};
@@ -3107,31 +3079,10 @@ function classifyHeadTurnOutcome(result) {
     return { failure: false };
 }
 
-function finalizeHeadTurnSummary(items, fallback) {
-    var state = headPy.getState(), summary = {
-        total: items.length, known: 0, frontal: 0, left: 0, right: 0, unknown: 0,
-        byBody: 0, byHeadOnly: 0, fallbackToGeometry: !!fallback, pythonMessage: state.message
-    };
-    for (var i = 0; i < items.length; i++) {
-        if (!items[i].headTurnValid) summary.unknown++;
-        else {
-            summary.known++;
-            if (items[i].headTurnByBody) summary.byBody++; else summary.byHeadOnly++;
-            if (items[i].headTurn == 0) summary.frontal++;
-            else if (items[i].headTurn < 0) summary.left++;
-            else summary.right++;
-        }
-    }
-    return summary;
-}
-
 function initGenders(items) {
     if (!items) return;
     for (var i = 0; i < items.length; i++) {
         items[i].gender = 'U';
-        items[i].genderSource = 'unknown';
-        items[i].genderConfidence = 0;
-        items[i].genderReason = '';
     }
 }
 
@@ -3168,43 +3119,9 @@ function photoAnalysisReasonText(reason, technical) {
     }
 }
 
-function finalizeGenderSummary(items, forceFallback) {
-    var state = genderPy.getState(),
-        summary = {
-            total: items ? items.length : 0,
-            male: 0,
-            female: 0,
-            unknown: 0,
-            byName: 0,
-            byImage: 0,
-            fallbackToGeometry: !!forceFallback,
-            pythonDisabled: state.disabled,
-            pythonReason: state.reason,
-            pythonMessage: state.message,
-            pythonFailureLimit: state.failureLimit,
-            pythonConsecutiveFailures: state.consecutiveFailures,
-            pythonTotalFailures: state.totalFailures,
-            pythonPhotoFailures: state.photoFailures
-        };
-
-    if (!items) return summary;
-    for (var i = 0; i < items.length; i++) {
-        if (items[i].gender == 'M') summary.male++;
-        else if (items[i].gender == 'F') summary.female++;
-        else summary.unknown++;
-        if (items[i].genderSource == 'name') summary.byName++;
-        else if (items[i].genderSource == 'image') summary.byImage++;
-    }
-    summary.fallbackToGeometry = summary.male + summary.female == 0;
-    return summary;
-}
-
 function applyGenderResult(item, result) {
     var sex = result && (result.sex == 'M' || result.sex == 'F') ? result.sex : 'U';
     item.gender = sex;
-    item.genderSource = result && result.source ? String(result.source) : 'unknown';
-    item.genderConfidence = result && isFinite(Number(result.confidence)) ? Number(result.confidence) : 0;
-    item.genderReason = result && result.reason ? String(result.reason) : '';
 }
 
 function restoreAnalysisHistory(parentDocumentId, anchorHistory, usePrevious) {
@@ -3457,8 +3374,6 @@ function rebuildAssignedLayout(plan, geometry, itemRows, trialOnly) {
         candidate = finalizeLayoutRows(specs, plan.commonScale, plan.baseGapX, plan.baseGapY, plan.actualGapY, metadata, semanticFixed);
     if (!candidate) return null;
     candidate.autoRows = plan.autoRows;
-    candidate.genderSummary = plan.genderSummary;
-    candidate.genderPasses = plan.genderPasses;
     for (r = 0; r < candidate.rows.length; r++) {
         var cr = candidate.rows[r], bottom = cr.y + cr.rowHeight * plan.commonScale;
         if (cr.y < geometry.bounds.top - 0.05 || bottom > geometry.bounds.bottom + 0.05) return null;
@@ -3672,7 +3587,6 @@ function buildGenderLayout(items, geometry) {
 
     if (seedPlan.pythonPacking || seedPlan.lockedMetrics) return seedPlan;
     seedPlan.genderCheckerboard = genderStats(seedPlan);
-    seedPlan.genderPasses = 0;
     var distribution = seedPlan.distribution.slice(0),
         reference = Math.max(seedPlan.commonScale, seedPlan.verticalReferenceScale || 0),
         candidates = [seedPlan], best = null,
@@ -3693,7 +3607,6 @@ function buildGenderLayout(items, geometry) {
 
         var stats = genderStats(candidate);
         candidate.genderCheckerboard = stats;
-        candidate.genderPasses = pass + 1;
 
         reference = Math.max(reference, candidate.commonScale, candidate.verticalReferenceScale || 0);
         candidates.push(candidate);
@@ -6317,9 +6230,7 @@ function PythonFeature(api, failureLimit) {
             reason: '',
             message: '',
             failureLimit: Math.max(1, Number(failureLimit) || 3),
-            consecutiveFailures: 0,
-            totalFailures: 0,
-            photoFailures: 0
+            consecutiveFailures: 0
         };
     }
 
@@ -6330,16 +6241,7 @@ function PythonFeature(api, failureLimit) {
     };
 
     this.getState = function () {
-        return {
-            initialized: state.initialized,
-            disabled: state.disabled,
-            reason: state.reason,
-            message: state.message,
-            failureLimit: state.failureLimit,
-            consecutiveFailures: state.consecutiveFailures,
-            totalFailures: state.totalFailures,
-            photoFailures: state.photoFailures
-        };
+        return { message: state.message };
     };
 
     this.isDisabled = function () {
@@ -6367,7 +6269,6 @@ function PythonFeature(api, failureLimit) {
     this.recordFailure = function (reason, message) {
         if (state.disabled) return;
         state.consecutiveFailures++;
-        state.totalFailures++;
         state.reason = reason || 'python_error';
         state.message = message || str.t('Ошибка дополнительного Python-анализа.', 'Optional Python analysis error.');
 
@@ -6385,11 +6286,6 @@ function PythonFeature(api, failureLimit) {
         state.message = '';
     };
 
-    this.recordPhotoFailure = function (reason, message) {
-        state.photoFailures++;
-        this.recordFailure(reason, message);
-    };
-
     this.call = function (type, payload, options) {
         options = options || {};
         if (!this.ensureReady()) {
@@ -6404,8 +6300,7 @@ function PythonFeature(api, failureLimit) {
         } catch (e) {
             if (e.number && e.number == 8007) throw e;
             var message = e && e.message ? e.message : String(e);
-            if (options.photo) this.recordPhotoFailure('python_error', message);
-            else this.recordFailure('python_error', message);
+            this.recordFailure('python_error', message);
             return { ok: false, error: e, disabled: state.disabled, reason: state.reason, message: state.message };
         }
     };
@@ -6804,8 +6699,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
 
 function AM(target, order) {
     var AR = ActionReference,
-        AD = ActionDescriptor,
-        AL = ActionList;
+        AD = ActionDescriptor;
 
     target = target ? s2t(target) : null;
 

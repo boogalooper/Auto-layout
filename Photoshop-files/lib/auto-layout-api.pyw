@@ -83,7 +83,7 @@ import pymorphy3
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.59"
+SERVER_ID = "auto-layout/0.10.60"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -129,8 +129,7 @@ GENDER_MODEL_PATH = resolve_model_path("gender.onnx")
 HEAD_MODEL_PATH = resolve_model_path("face_landmarker.task")
 BODY_MODEL_PATH = resolve_model_path("pose_landmarker_full.task")
 HEAD_FRONT_DEGREES = 2.0
-# Body yaw around the old 12-degree cutoff is intentionally blended instead
-# of switched. 8..16 keeps 12 degrees at the middle of a smooth transition.
+# Blend body influence smoothly between the two yaw thresholds.
 BODY_TURN_BLEND_START_DEGREES = 6.0
 BODY_TURN_BLEND_FULL_DEGREES = 18.0
 BODY_BASE_WEIGHT = 0.70
@@ -168,7 +167,7 @@ def get_russian_names():
                 raise
             russian_names_store = store
         except Exception:
-            # Existing runtime can still use pymorphy3 until its installer runs.
+            # Keep name analysis available if the optional dictionary cannot be loaded.
             logging.warning("russiannames unavailable; using pymorphy3 fallback", exc_info=True)
         return russian_names_store
 
@@ -485,7 +484,7 @@ def read_image(path):
         return None
 
 
-def choose_face(img, with_region=False):
+def choose_face(img):
     h, w = img.shape[:2]
     if h < 16 or w < 16:
         return None, "image_too_small"
@@ -530,10 +529,7 @@ def choose_face(img, with_region=False):
     if x1 - x0 < 16 or y1 - y0 < 16:
         return None, "face_crop_too_small"
 
-    selected = (img[y0:y1, x0:x1], face_score)
-    if with_region:
-        selected += ((x0, y0, x1, y1),)
-    return selected, None
+    return (img[y0:y1, x0:x1], face_score, (x0, y0, x1, y1)), None
 
 
 def binary_probabilities(values):
@@ -1067,7 +1063,7 @@ def store_photo_cache(key, answer):
 
 
 def analyze_photo(payload, state):
-    """One read and one YuNet crop for both optional features."""
+    """Share one image read and one face detection across requested features."""
     want_gender = payload.get("gender") is True
     want_head = payload.get("head_turn") is True
     want_color = payload.get("color") is True
@@ -1075,7 +1071,7 @@ def analyze_photo(payload, state):
     if not want_gender and not want_head and not want_color:
         raise ValueError("analyze_image requires at least one feature")
     img = read_image(payload.get("path"))
-    selected, reason = (choose_face(img, with_region=True) if img is not None else (None, "image_read_failed"))
+    selected, reason = (choose_face(img) if img is not None else (None, "image_read_failed"))
     if selected is None:
         status = "technical_failure" if reason == "image_read_failed" else "not_applicable"
         if want_gender:
@@ -1102,7 +1098,7 @@ def analyze_photo(payload, state):
         if request_cancelled(state):
             return None
         try:
-            return classify_body_image(img, selected[2] if len(selected) > 2 else None,
+            return classify_body_image(img, selected[2],
                                        lambda: request_cancelled(state))
         except Exception as exc:
             logging.exception("Body turn analysis failed; retaining head estimate")
@@ -1122,7 +1118,7 @@ def analyze_photo(payload, state):
                                         needs_image=False, analysis_status="technical_failure", message=str(exc))
         if want_color and not request_cancelled(state):
             try:
-                answer["color"] = classify_clothing_colors(img, selected[2] if len(selected) > 2 else None,
+                answer["color"] = classify_clothing_colors(img, selected[2],
                                                            lambda: request_cancelled(state))
             except Exception as exc:
                 logging.exception("Clothing color analysis failed")
@@ -1568,7 +1564,7 @@ def calculate_zone_layout(payload, state, time_budget=30.0):
                 w, h = metrics[offset][count]
                 specs.append(dict(zoneIndex=zi, ids=[i["id"] for i in order[offset:offset+count]], contentWidth=w, rowHeight=h))
                 offset += count
-            for zi, amount, original in allocation[1]:
+            for zi, _, original in allocation[1]:
                 if sum(original) != groups.get(zi, [0])[0]: return None
             minimum = scale * (1 - COMPOSITION_MAX_SCALE_LOSS)
             for zi in groups:
