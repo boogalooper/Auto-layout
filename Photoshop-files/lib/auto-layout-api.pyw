@@ -8,6 +8,9 @@ import tempfile
 import re
 import logging
 import math
+import uuid
+import struct
+import zlib
 import itertools
 import urllib.request
 from collections import OrderedDict
@@ -78,12 +81,13 @@ if __name__ == "__main__" and "--prepare-install" in sys.argv:
 
 import cv2
 import numpy as np
+from PIL import Image
 import pymorphy3
 
 API_HOST = "127.0.0.1"
 API_PORT_SEND = 6340      # Python -> JSX response listener
 API_PORT_LISTEN = 6341    # JSX -> Python requests
-SERVER_ID = "auto-layout/0.10.62"
+SERVER_ID = "auto-layout/0.10.63"
 TIMEOUT = 15 * 60
 REQUEST_HEARTBEAT_TIMEOUT = 4.0
 COMPOSITION_MAX_SCALE_LOSS = 0.01
@@ -116,6 +120,356 @@ head_landmarker = None
 head_landmarker_lock = threading.Lock()
 model_init_lock = threading.Lock()
 analysis_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="auto-layout-pose")
+
+MAX_BYTES = 512 * 1024 * 1024
+
+
+def _read(f, size, end=None):
+    if size < 0 or (end is not None and f.tell()+size > end):
+        raise ValueError('Invalid PSD/PSB section boundary')
+    data = f.read(size)
+    if len(data) != size:
+        raise ValueError('Truncated PSD/PSB composite')
+    return data
+
+
+def read_composite(path):
+    with open(path, 'rb') as f:
+        total = os.fstat(f.fileno()).st_size
+        signature, version, _, channels, h, w, depth, mode = struct.unpack('>4sH6sHIIHH', _read(f, 26))
+        if signature != b'8BPS' or version not in (1, 2):
+            raise ValueError('Not a PSD/PSB file')
+        if mode not in (1, 3) or depth not in (8, 16, 32):
+            raise ValueError('PSB input requires RGB or grayscale, 8/16/32 bits')
+        colors = 3 if mode == 3 else 1
+        if not 1 <= w <= 300000 or not 1 <= h <= 300000 or not colors <= channels <= 56:
+            raise ValueError('Invalid PSD/PSB dimensions/channels')
+        expected = w * h * channels * (depth // 8)
+        if expected > MAX_BYTES:
+            raise ValueError('Composite exceeds 512 MiB; enable Resize for detector')
+        # Color data, resources, layer/mask section. No reading layer pixel data.
+        for fmt in ('>I', '>I', '>Q' if version == 2 else '>I'):
+            size = struct.unpack(fmt, _read(f, struct.calcsize(fmt)))[0]
+            if f.tell() + size > total:
+                raise ValueError('Invalid PSD/PSB section length')
+            f.seek(size, 1)
+        compression = struct.unpack('>H', _read(f, 2))[0]
+        count = w * h * colors * (depth // 8)
+        if compression == 0:
+            data = _read(f, count)
+        elif compression == 1:
+            lengths = np.frombuffer(_read(f, h * channels * (4 if version == 2 else 2)),
+                                    dtype='>u4' if version == 2 else '>u2')
+            n = int(lengths[:h * colors].sum())
+            if n > MAX_BYTES or f.tell() + int(lengths.sum()) > total:
+                raise ValueError('Invalid RLE byte counts')
+            packed = _read(f, n)
+            # PSD RLE is PackBits over byte rows, also for 16/32-bit pixels.
+            data = Image.frombytes('L', (w * (depth // 8), h * colors),
+                                   packed, 'packbits', 'L').tobytes()
+        elif compression in (2, 3):
+            packed = f.read(MAX_BYTES + 1)
+            if len(packed) > MAX_BYTES:
+                raise ValueError('ZIP composite input too large')
+            codec = zlib.decompressobj()
+            data = codec.decompress(packed, expected + 1)
+            if len(data) != expected or not codec.eof or codec.unconsumed_tail or codec.unused_data:
+                raise ValueError('Invalid ZIP composite size/stream')
+            data = data[:count]
+        else:
+            raise ValueError('Unknown PSD/PSB compression')
+        if len(data) != count:
+            raise ValueError('Invalid composite byte count')
+        rows = h * colors
+        if compression == 3:
+            if depth == 8:
+                data = np.frombuffer(data, np.uint8).reshape(rows, w).cumsum(axis=1, dtype=np.uint8).tobytes()
+            elif depth == 16:
+                data = np.frombuffer(data, '>u2').reshape(rows, w).cumsum(axis=1, dtype=np.uint16).astype('>u2').tobytes()
+            else:
+                delta = np.frombuffer(data, np.uint8).reshape(rows, w * 4).cumsum(axis=1, dtype=np.uint8)
+                data = delta.reshape(rows, 4, w).transpose(0, 2, 1).copy().tobytes()
+        dtype = {8: np.uint8, 16: '>u2', 32: '>f4'}[depth]
+        image = np.frombuffer(data, dtype).reshape(colors, h, w).transpose(1, 2, 0)
+        if depth == 16:
+            image = (image >> 8).astype(np.uint8)
+        elif depth == 32:
+            # Linear float RGB -> display sRGB for the detectors.
+            image = np.nan_to_num(image, nan=0.0, posinf=1.0, neginf=0.0)
+            image = np.clip(image, 0, 1)
+            image = np.where(image <= .0031308, image * 12.92, 1.055 * image ** (1 / 2.4) - .055)
+            image = np.rint(image * 255).astype(np.uint8)
+        if colors == 1:
+            image = np.repeat(image, 3, axis=2)
+        return np.ascontiguousarray(image[:, :, ::-1])  # OpenCV BGR
+
+
+def _layer_plane(data, w, h, depth, version, alpha=False):
+    """Decode one raster channel (the RLE table is local to this channel)."""
+    if len(data)<2 or depth not in (8,16,32) or w<=0 or h<=0 or w*h*(depth//8)>MAX_BYTES:
+        raise ValueError('Invalid raster channel header or dimensions')
+    compression = int.from_bytes(data[:2], 'big')
+    expected = w*h*(depth//8)
+    payload = data[2:]
+    if compression == 0:
+        raw = payload
+    elif compression == 1:
+        size = 4 if version == 2 else 2
+        table_bytes = size*h
+        if len(payload) < table_bytes:
+            raise ValueError('Truncated layer RLE table')
+        lengths = np.frombuffer(payload[:table_bytes], '>u4' if version == 2 else '>u2')
+        if int(lengths.sum()) != len(payload)-table_bytes:
+            raise ValueError('Invalid layer RLE byte counts')
+        raw = Image.frombytes('L',(w*(depth//8),h),payload[table_bytes:],'packbits','L').tobytes()
+    elif compression in (2,3):
+        codec = zlib.decompressobj()
+        raw = codec.decompress(payload,expected+1)
+        if len(raw) != expected or not codec.eof or codec.unconsumed_tail or codec.unused_data:
+            raise ValueError('Invalid layer ZIP stream')
+    else:
+        raise ValueError('Unknown layer compression')
+    if len(raw) != expected:
+        raise ValueError('Invalid raster channel size')
+    if compression == 3:
+        if depth == 8:
+            raw = np.frombuffer(raw,np.uint8).reshape(h,w).cumsum(axis=1,dtype=np.uint8).tobytes()
+        elif depth == 16:
+            raw = np.frombuffer(raw,'>u2').reshape(h,w).cumsum(axis=1,dtype=np.uint16).astype('>u2').tobytes()
+        else:
+            delta = np.frombuffer(raw,np.uint8).reshape(h,w*4).cumsum(axis=1,dtype=np.uint8)
+            raw = delta.reshape(h,4,w).transpose(0,2,1).copy().tobytes()
+    plane = np.frombuffer(raw,{8:np.uint8,16:'>u2',32:'>f4'}[depth]).reshape(h,w)
+    if depth == 16:
+        return (plane >> 8).astype(np.uint8)
+    if depth == 32:
+        plane = np.clip(np.nan_to_num(plane,nan=0,posinf=1,neginf=0),0,1)
+        if not alpha:
+            plane = np.where(plane<=.0031308,plane*12.92,1.055*plane**(1/2.4)-.055)
+        return np.rint(plane*255).astype(np.uint8)
+    return plane
+
+
+def _single_layer(f, offset, length, version, depth, mode, canvas_w, canvas_h):
+    """Narrow fast path: one visible normal raster layer without a user mask.
+
+    Return None for documents requiring general layer compositing. No layer tree
+    rendering, smart object traversal or rasterization is performed here.
+    """
+    if length < 2:
+        return None
+    if offset+length>os.fstat(f.fileno()).st_size:
+        raise ValueError('Invalid raster layer section boundary')
+    end=offset+length
+    read=lambda size: _read(f,size,end)
+    f.seek(offset)
+    if abs(struct.unpack('>h',read(2))[0]) != 1:
+        return None
+    top,left,bottom,right = struct.unpack('>iiii',read(16))
+    w,h = right-left,bottom-top
+    count = struct.unpack('>H',read(2))[0]
+    if not 1<=count<=56 or w<=0 or h<=0 or w*h*count*(depth//8)>MAX_BYTES:
+        raise ValueError('Invalid single raster layer dimensions')
+    channels=[]
+    for _ in range(count):
+        cid = struct.unpack('>h',read(2))[0]
+        size = struct.unpack('>Q' if version==2 else '>I',read(8 if version==2 else 4))[0]
+        channels.append((cid,size))
+    signature,blend = read(4),read(4)
+    opacity,clipping,flags,_ = read(4)
+    extra = struct.unpack('>I',read(4))[0]
+    extra_start = f.tell()
+    if extra<4 or extra_start+extra>offset+length:
+        raise ValueError('Invalid raster layer extra data')
+    mask_size = struct.unpack('>I',read(4))[0]
+    if signature!=b'8BIM' or blend!=b'norm' or clipping or flags&2 or (flags&8 and flags&16):
+        return None
+    extra_end=extra_start+extra
+    if mask_size:
+        # Disabled masks do not affect appearance. Active masks need Photoshop
+        # compositing, so never silently use the unmasked pixels.
+        if mask_size>extra_end-f.tell():
+            raise ValueError('Invalid raster layer mask length')
+        mask=read(min(mask_size,18))
+        if len(mask)<18 or not mask[17]&2:
+            return None
+        f.seek(mask_size-len(mask),1)
+    if f.tell()+4>extra_end:
+        raise ValueError('Invalid raster layer blending ranges')
+    ranges_size=int.from_bytes(read(4),'big')
+    if ranges_size>extra_end-f.tell():
+        raise ValueError('Invalid raster layer blending range size')
+    if ranges_size>8*(count+1):
+        return None
+    ranges=read(ranges_size)
+    if ranges and (len(ranges)%8 or ranges!=b'\x00\x00\xff\xff\x00\x00\xff\xff'*(len(ranges)//8)):
+        return None
+    if f.tell()>=extra_end:
+        raise ValueError('Missing raster layer name')
+    name_size=read(1)[0]
+    name_bytes=name_size+(-(name_size+1))%4
+    if f.tell()+name_bytes>extra_end:
+        raise ValueError('Invalid raster layer name')
+    f.seek(name_bytes,1)
+    fill=255
+    unsupported={b'lrFX',b'lfx2',b'lmfx',b'vmsk',b'vsms',b'TySh',b'SoCo',b'GdFl',b'PtFl',
+                 b'SoLd',b'SoLE',b'PlLd',b'levl',b'curv',b'hue2',b'brit',b'blnc',b'CgEd'}
+    while f.tell()<extra_end:
+        if extra_end-f.tell()<12:
+            if any(read(extra_end-f.tell())):
+                raise ValueError('Invalid raster layer tagged block padding')
+            break
+        sig,key=read(4),read(4)
+        size=int.from_bytes(read(8 if sig==b'8B64' else 4),'big')
+        at=f.tell()
+        if sig not in (b'8BIM',b'8B64') or at+size+(size%2)>extra_end:
+            raise ValueError('Invalid raster layer tagged block')
+        if key in unsupported:
+            return None
+        if key==b'iOpa' and size:
+            fill=read(1)[0]
+        if key in (b'lsct',b'lsdk') and size>=4 and int.from_bytes(read(4),'big'):
+            return None
+        next_at=at+size+(size%2)
+        f.seek(next_at)
+        if extra_end-next_at>=6:
+            probe=read(6)
+            if probe[:2]==b'\0\0' and probe[2:] in (b'8BIM',b'8B64'):
+                next_at+=2
+        f.seek(next_at)
+    f.seek(extra_end)
+    if f.tell()+sum(size for _,size in channels)>offset+length:
+        raise ValueError('Truncated raster layer channels')
+    colors = 3 if mode==3 else 1
+    if len(set(cid for cid,_ in channels))!=len(channels):
+        raise ValueError('Duplicate raster channel IDs')
+    if not set(range(colors)).issubset(cid for cid,_ in channels):
+        return None
+    planes={}
+    for cid,size in channels:
+        if cid in (*range(colors),-1):
+            if size>MAX_BYTES or size<2:
+                raise ValueError('Invalid raster channel length')
+            planes[cid]=_layer_plane(read(size),w,h,depth,version,alpha=cid==-1)
+        else:
+            f.seek(size,1)
+    rgb = np.stack([planes[i] for i in range(colors)],axis=2)
+    if colors==1:
+        rgb=np.repeat(rgb,3,axis=2)
+    if -1 in planes or opacity!=255 or fill!=255:
+        a=planes[-1].astype(np.uint32) if -1 in planes else np.full((h,w),255,np.uint32)
+        a=(a*opacity*fill+32512)//65025
+        a=a[:,:,None]
+        rgb=((rgb.astype(np.uint32)*a+255*(255-a)+127)//255).astype(np.uint8)
+    canvas=np.full((canvas_h,canvas_w,3),255,np.uint8)
+    x0,y0,x1,y1=max(0,left),max(0,top),min(canvas_w,right),min(canvas_h,bottom)
+    if x1>x0 and y1>y0:
+        canvas[y0:y1,x0:x1]=rgb[y0-top:y1-top,x0-left:x1-left]
+    return np.ascontiguousarray(canvas[:,:,::-1])
+
+
+def read_detector_image(path):
+    """Prefer the actual raster layer in fresh exports: merged data may be white."""
+    with open(path,'rb') as f:
+        total=os.fstat(f.fileno()).st_size
+        signature,version,_,channels,h,w,depth,mode=struct.unpack('>4sH6sHIIHH',_read(f,26))
+        if signature!=b'8BPS' or version not in (1,2):
+            raise ValueError('Not a PSD/PSB file')
+        if mode not in (1,3) or depth not in (8,16,32):
+            raise ValueError('PSB input requires RGB or grayscale, 8/16/32 bits')
+        if not 1<=w<=300000 or not 1<=h<=300000 or not (3 if mode==3 else 1)<=channels<=56 or w*h*max(channels,3)*(depth//8)>MAX_BYTES:
+            raise ValueError('Composite exceeds 512 MiB or has invalid dimensions; enable Resize for detector')
+        size=struct.unpack('>I',_read(f,4))[0]
+        if f.tell()+size>total:raise ValueError('Invalid color section length')
+        f.seek(size,1)
+        resource_size=struct.unpack('>I',_read(f,4))[0]
+        resource_end=f.tell()+resource_size
+        if resource_end>total:raise ValueError('Invalid resource section length')
+        has_merged=None
+        while f.tell()<resource_end:
+            if resource_end-f.tell()<12:
+                if any(_read(f,resource_end-f.tell())):
+                    raise ValueError('Invalid resource padding')
+                break
+            signature=_read(f,4,resource_end)
+            resource_id=struct.unpack('>H',_read(f,2,resource_end))[0]
+            n=_read(f,1,resource_end)[0]
+            _read(f,n+((n+1)%2),resource_end)
+            length=struct.unpack('>I',_read(f,4,resource_end))[0]
+            at=f.tell()
+            if signature!=b'8BIM' or at+length+(length%2)>resource_end:
+                raise ValueError('Invalid image resource length/signature')
+            if resource_id==1057:
+                if length<5:raise ValueError('Invalid VersionInfo resource')
+                version_info=_read(f,5,resource_end)
+                has_merged=bool(version_info[4])
+            f.seek(at+length+(length%2))
+        f.seek(resource_end)
+        long_size=8 if version==2 else 4
+        fmt='>Q' if version==2 else '>I'
+        section_size=struct.unpack(fmt,_read(f,long_size))[0]
+        section_end=f.tell()+section_size
+        if section_end>total:raise ValueError('Invalid layer/mask section length')
+        candidates=[]
+        if section_size:
+            length=struct.unpack(fmt,_read(f,long_size,section_end))[0]
+            start=f.tell()
+            if start+length>section_end:raise ValueError('Invalid layer info length')
+            if length:candidates.append((start,length))
+            # Common RGB8 export: avoid parsing unrelated global metadata at all.
+            # High-depth files must locate Lr16/Lr32 before trying the main proxy.
+            if length and depth==8:
+                try:
+                    image=_single_layer(f,start,length,version,depth,mode,w,h)
+                    if image is not None:return image
+                except (ValueError,OSError,struct.error):
+                    pass  # Try a confirmed real composite or report below.
+            f.seek(start+length)
+            if f.tell()<section_end:
+                mask_size=struct.unpack('>I',_read(f,4,section_end))[0]
+                if f.tell()+mask_size>section_end:raise ValueError('Invalid global mask length')
+                f.seek(mask_size,1)
+                while f.tell()<section_end:
+                    if section_end-f.tell()<12:
+                        if any(_read(f,section_end-f.tell())):
+                            raise ValueError('Invalid additional layer padding')
+                        break
+                    sig,key=_read(f,4,section_end),_read(f,4,section_end)
+                    if sig not in (b'8BIM',b'8B64'):
+                        raise ValueError('Invalid additional layer signature')
+                    big=sig==b'8B64' or version==2 and key in (b'LMsk',b'Lr16',b'Lr32',b'Layr',b'Mt16',b'Mt32',b'Mtrn',b'Alph',b'FMsk',b'lnk2',b'FEid',b'FXid',b'PxSD')
+                    n=struct.unpack('>Q' if big else '>I',_read(f,8 if big else 4,section_end))[0]
+                    at=f.tell()
+                    if at+n+(n%2)>section_end:raise ValueError('Invalid additional layer info length')
+                    if key=={8:b'Layr',16:b'Lr16',32:b'Lr32'}[depth]:
+                        candidates.insert(0,(at,n))
+                    next_at=at+n+(n%2)
+                    # Photoshop also aligns global tagged blocks to four bytes.
+                    # Accept two-byte padding when the next valid signature is
+                    # there; never scan arbitrary payload bytes for a header.
+                    f.seek(next_at)
+                    if section_end-next_at>=6:
+                        probe=_read(f,6,section_end)
+                        if probe[:2]==b'\0\0' and probe[2:] in (b'8BIM',b'8B64'):
+                            next_at+=2
+                    f.seek(next_at)
+        errors=[]
+        for start,length in candidates:
+            try:
+                image=_single_layer(f,start,length,version,depth,mode,w,h)
+                if image is not None:return image
+            except (ValueError,OSError,struct.error) as exc:
+                errors.append(str(exc))
+    # A white placeholder can also exist without VersionInfo. Require an
+    # affirmative real-merged flag when there are layers we cannot reproduce.
+    if section_size and has_merged is not True:
+        detail='; '.join(errors) if errors else 'masks, effects or unsupported layer structure'
+        raise ValueError('PSB has no confirmed real merged image and its raster layer cannot be read: '+detail)
+    if has_merged is False:
+        raise ValueError('PSB has no real merged image or usable raster layer')
+    return read_composite(path)
+
+
 
 CYRILLIC_RE = re.compile(r"[А-ЯЁа-яё][А-ЯЁа-яё-]{1,}")
 
@@ -1062,7 +1416,7 @@ def store_photo_cache(key, answer):
             photo_analysis_cache.popitem(last=False)
 
 
-def analyze_photo(payload, state):
+def analyze_photo(payload, state, image=None):
     """Share one image read and one face detection across requested features."""
     want_gender = payload.get("gender") is True
     want_head = payload.get("head_turn") is True
@@ -1070,7 +1424,7 @@ def analyze_photo(payload, state):
     answer = {"id": payload.get("id"), "gender": None, "head_turn": None, "color": None}
     if not want_gender and not want_head and not want_color:
         raise ValueError("analyze_image requires at least one feature")
-    img = read_image(payload.get("path"))
+    img = image if image is not None else read_image(payload.get("path"))
     selected, reason = (choose_face(img) if img is not None else (None, "image_read_failed"))
     if selected is None:
         status = "technical_failure" if reason == "image_read_failed" else "not_applicable"
@@ -2055,6 +2409,8 @@ def cancel_request(request_id):
 
 def request_server_shutdown():
     shutdown_event.set()
+    with photo_batches_lock:
+        for batch in photo_batches.values():batch["cancel"].set()
     with active_requests_lock:
         states = list(active_requests.values())
     for state in states:
@@ -2064,7 +2420,7 @@ def request_server_shutdown():
 def request_cancelled(state):
     if state["cancel"].is_set():
         return True
-    if time.monotonic() - state["last_heartbeat"] > REQUEST_HEARTBEAT_TIMEOUT:
+    if "last_heartbeat" in state and time.monotonic() - state["last_heartbeat"] > REQUEST_HEARTBEAT_TIMEOUT:
         state["cancel"].set()
         return True
     return False
@@ -2088,7 +2444,7 @@ def queue_preview_cleanup(path):
     if (os.path.normcase(os.path.realpath(os.path.dirname(path))) !=
             os.path.normcase(os.path.realpath(tempfile.gettempdir()))):
         return False
-    if not re.fullmatch(r"ALG_\d+_\d+_\d+\.jpg", os.path.basename(path), re.IGNORECASE):
+    if not re.fullmatch(r"ALG_\d+_\d+_\d+\.(?:psb|jpg)", os.path.basename(path), re.IGNORECASE):
         return False
     with cleanup_lock:
         pending_cleanup.add(path)
@@ -2148,6 +2504,166 @@ def log_gender_result(layer_name, answer, request_id, method):
     }, ensure_ascii=False, allow_nan=False))
 
 
+# File preparation overlaps decoding and inference. Model inference remains
+# serial here; analyze_photo has a separate pool for its head/body subtasks.
+preview_read_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='layout-preview')
+photo_batch_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix='layout-photo')
+photo_batches = {}
+photo_batches_lock = threading.Lock()
+PHOTO_FEATURES = ('gender', 'head_turn', 'color')
+
+
+def valid_batch_preview(path):
+    return (isinstance(path, str) and
+            os.path.normcase(os.path.realpath(os.path.dirname(path))) ==
+            os.path.normcase(os.path.realpath(tempfile.gettempdir())) and
+            re.fullmatch(r'ALG_\d+_\d+_\d+\.(?:psb|jpg)', os.path.basename(path), re.IGNORECASE))
+
+
+def decode_photo_batch(batch, index, path):
+    acquired = False
+    try:
+        with batch['read_order']:
+            while index != batch['next_read']:
+                if batch['cancel'].is_set():return None, False
+                batch['read_order'].wait(.1)
+            while not batch['cancel'].is_set():
+                if batch['slots'].acquire(timeout=.1):
+                    acquired = True
+                    batch['next_read'] += 1
+                    batch['read_order'].notify_all()
+                    break
+        if not acquired or batch['cancel'].is_set():return None, acquired
+        if not path:return None, acquired
+        image = read_detector_image(path) if path.lower().endswith('.psb') else read_image(path)
+        if image is None:raise ValueError('Could not read the prepared image')
+        return image, acquired
+    except Exception as exc:
+        return exc, acquired
+    finally:
+        if path:queue_preview_cleanup(path)
+
+
+def run_photo_batch_item(batch, payload, decoded):
+    acquired = False
+    try:
+        image, acquired = decoded.result()
+        if batch['cancel'].is_set():return {'skipped': True}
+        active = [k for k in PHOTO_FEATURES if payload.get('want_'+k) and k not in batch['disabled']]
+        if batch['stopped'] or not active:return {'skipped': True}
+        cached = payload.get('cached') or {}
+        needed = [k for k in active if payload.get(k) is True]
+        try:
+            if payload.get('preview_error'):raise ValueError(payload['preview_error'])
+            if isinstance(image, Exception):raise image
+            answer = dict(id=payload['id'], gender=None, head_turn=None, color=None)
+            if needed:
+                if image is None:raise ValueError('Prepared image is unavailable')
+                request = dict(payload, **{k: k in needed for k in PHOTO_FEATURES})
+                with request_lock:
+                    if batch['cancel'].is_set():return {'skipped': True}
+                    answer = analyze_photo(request, batch, image)
+            if batch['cancel'].is_set():return {'skipped': True}
+            for key in PHOTO_FEATURES:
+                if cached.get(key):answer[key] = deepcopy(cached[key])
+            failed, useful = False, False
+            for key in active:
+                value = answer.get(key) or {}
+                if value.get('analysis_status') == 'technical_failure' or not value.get('analysis_status'):
+                    failed = True
+                    batch['failures'][key] += 1
+                    if batch['failures'][key] >= batch['failure_limit']:batch['disabled'].add(key)
+                else:
+                    batch['failures'][key] = 0
+                    if value.get('analysis_status') == 'ok':
+                        useful |= key != 'gender' or value.get('sex') in ('M','F')
+            batch['empty_streak'] = 0 if failed or useful else batch['empty_streak']+1
+            if batch['empty_streak'] >= batch['empty_limit']:batch['stopped'] = True
+            if batch['requested'] and batch['requested'].issubset(batch['disabled']):batch['stopped']=True
+            store_photo_cache(payload.get('cache_key'), answer)
+            return {'ok': True, 'value': answer}
+        except Exception as exc:
+            if batch['cancel'].is_set():return {'skipped': True}
+            logging.exception('Prepared layer analysis failed')
+            batch['empty_streak'] = 0
+            for key in needed:
+                batch['failures'][key] += 1
+                if batch['failures'][key] >= batch['failure_limit']:batch['disabled'].add(key)
+            if batch['requested'] and batch['requested'].issubset(batch['disabled']):batch['stopped']=True
+            return {'ok': False, 'message': str(exc), 'reason': 'preview_error'}
+    finally:
+        if acquired:batch['slots'].release()
+
+
+def handle_photo_batch(kind, payload, request_id, reply):
+    if not isinstance(payload, dict):raise ValueError('Invalid photo batch payload')
+    if kind == 'photo_batch_begin':
+        with photo_batches_lock:
+            if photo_batches:raise RuntimeError('Previous photo batch is still active')
+            batch_id = uuid.uuid4().hex
+            batch = dict(cancel=threading.Event(), slots=threading.Semaphore(3), read_order=threading.Condition(),
+                         next_read=0, jobs=[], finishing=False, last=time.monotonic(),
+                         failures={k:0 for k in PHOTO_FEATURES}, disabled=set(), stopped=False, empty_streak=0,
+                         requested={k for k in PHOTO_FEATURES if (payload.get('features') or {}).get(k)},
+                         empty_limit=max(1,min(500,int(payload.get('empty_limit',3)))),
+                         failure_limit=max(1,min(500,int(payload.get('failure_limit',3)))))
+            photo_batches[batch_id] = batch
+        try:reply('answer',batch_id)
+        except Exception:
+            batch['cancel'].set()
+            with photo_batches_lock:photo_batches.pop(batch_id,None)
+            raise
+        return
+    batch_id = payload.get('batch_id')
+    with photo_batches_lock:
+        batch = photo_batches.get(batch_id)
+        if batch:batch['last'] = time.monotonic()
+    if batch is None:
+        if kind == 'photo_batch_abort':reply('answer',True);return
+        raise ValueError('Unknown photo batch')
+    if kind == 'photo_batch_add':
+        with photo_batches_lock:
+            if batch['finishing'] or batch['cancel'].is_set():raise RuntimeError('Photo batch is closed')
+            index, item = payload.get('index'), payload.get('item')
+            if type(index) is not int or index != len(batch['jobs']) or not isinstance(item,dict):
+                raise ValueError('Invalid photo batch order')
+            path = item.get('path')
+            if type(item.get('id')) is not int or (path is not None and not valid_batch_preview(path)):
+                raise ValueError('Invalid photo layer/path')
+            decoded = preview_read_pool.submit(decode_photo_batch,batch,index,path)
+            batch['jobs'].append(photo_batch_pool.submit(run_photo_batch_item,batch,item,decoded))
+        reply('answer',{'stopped': batch['stopped']})
+    elif kind == 'photo_batch_abort':
+        batch['cancel'].set()
+        with photo_batches_lock:photo_batches.pop(batch_id,None)
+        reply('answer',True)
+    elif kind == 'photo_batch_finish':
+        with photo_batches_lock:
+            if batch['finishing'] or batch['cancel'].is_set():raise RuntimeError('Photo batch is closed')
+            batch['finishing'] = True
+        state = register_active_request(request_id)
+        try:
+            while not all(job.done() for job in batch['jobs']):
+                if batch['cancel'].is_set() or request_cancelled(state):
+                    batch['cancel'].set();reply('cancelled','Operation cancelled');return
+                time.sleep(.05)
+            if batch['cancel'].is_set() or request_cancelled(state):
+                reply('cancelled','Operation cancelled');return
+            reply('answer',{'items':[job.result() for job in batch['jobs']]})
+        finally:
+            unregister_active_request(request_id)
+            batch['cancel'].set()
+            with photo_batches_lock:photo_batches.pop(batch_id,None)
+    else:raise ValueError('Unknown photo batch command')
+
+
+def expire_photo_batches():
+    with photo_batches_lock:
+        for key,batch in list(photo_batches.items()):
+            if not batch['finishing'] and time.monotonic()-batch['last'] > TIMEOUT:
+                batch['cancel'].set();photo_batches.pop(key,None)
+
+
 def handle_client(client_socket):
     global last_request_time
     request_id = None
@@ -2186,6 +2702,9 @@ def handle_client(client_socket):
 
         if kind == "handshake":
             reply("answer", SERVER_ID)
+            return
+        if isinstance(kind,str) and kind.startswith("photo_batch_"):
+            handle_photo_batch(kind,message.get("message"),request_id,reply)
             return
         if kind == "analysis_cache":
             reply("answer", read_photo_cache(message.get("message")))
@@ -2392,6 +2911,7 @@ def start_server():
                 threading.Thread(target=handle_client, args=(client,), daemon=True).start()
             except socket.timeout:
                 flush_preview_cleanup()
+                expire_photo_batches()
 
             if shutdown_event.is_set():
                 if not request_lock.locked():
@@ -2400,7 +2920,7 @@ def start_server():
 
             with active_requests_lock:
                 has_active_requests = bool(active_requests)
-            if not has_active_requests and not request_lock.locked() and time.monotonic() - last_request_time > TIMEOUT:
+            if not photo_batches and not has_active_requests and not request_lock.locked() and time.monotonic() - last_request_time > TIMEOUT:
                 shutdown_event.set()
                 break
 
@@ -2456,6 +2976,10 @@ if __name__ == "__main__":
         except OSError:
             logging.exception("Server could not bind its dedicated port")
         finally:
+            with photo_batches_lock:
+                for batch in photo_batches.values():batch["cancel"].set()
+            photo_batch_pool.shutdown(wait=True)
+            preview_read_pool.shutdown(wait=True)
             analysis_pool.shutdown(wait=True)
             with russian_names_lock:
                 if russian_names_store is not None:

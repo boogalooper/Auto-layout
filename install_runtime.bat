@@ -303,9 +303,9 @@ if not errorlevel 1 (
 echo.
 echo Installing pinned packages into the private venv...
 if "%PIP_INSECURE%"=="1" (
-    "%UV%" pip install --python "%PY%" --upgrade --no-build "numpy==%NUMPY_VERSION%" "opencv-contrib-python==%OPENCV_VERSION%" "pymorphy3==%PYMORPHY_VERSION%" "pymorphy3-dicts-ru==%PYMORPHY_DICTS_VERSION%" "dawg2-python==%DAWG_VERSION%" "mediapipe==%MEDIAPIPE_VERSION%" "jax==%JAX_VERSION%" "jaxlib==%JAX_VERSION%" "russiannames==%RUSSIANNAMES_VERSION%" "duckdb==%DUCKDB_VERSION%" --allow-insecure-host pypi.org --allow-insecure-host files.pythonhosted.org
+    "%UV%" pip install --python "%PY%" --upgrade --no-build "numpy==%NUMPY_VERSION%" "opencv-contrib-python==%OPENCV_VERSION%" "pillow>=10.3" "pymorphy3==%PYMORPHY_VERSION%" "pymorphy3-dicts-ru==%PYMORPHY_DICTS_VERSION%" "dawg2-python==%DAWG_VERSION%" "mediapipe==%MEDIAPIPE_VERSION%" "jax==%JAX_VERSION%" "jaxlib==%JAX_VERSION%" "russiannames==%RUSSIANNAMES_VERSION%" "duckdb==%DUCKDB_VERSION%" --allow-insecure-host pypi.org --allow-insecure-host files.pythonhosted.org
 ) else (
-    "%UV%" pip install --python "%PY%" --upgrade --no-build "numpy==%NUMPY_VERSION%" "opencv-contrib-python==%OPENCV_VERSION%" "pymorphy3==%PYMORPHY_VERSION%" "pymorphy3-dicts-ru==%PYMORPHY_DICTS_VERSION%" "dawg2-python==%DAWG_VERSION%" "mediapipe==%MEDIAPIPE_VERSION%" "jax==%JAX_VERSION%" "jaxlib==%JAX_VERSION%" "russiannames==%RUSSIANNAMES_VERSION%" "duckdb==%DUCKDB_VERSION%"
+    "%UV%" pip install --python "%PY%" --upgrade --no-build "numpy==%NUMPY_VERSION%" "opencv-contrib-python==%OPENCV_VERSION%" "pillow>=10.3" "pymorphy3==%PYMORPHY_VERSION%" "pymorphy3-dicts-ru==%PYMORPHY_DICTS_VERSION%" "dawg2-python==%DAWG_VERSION%" "mediapipe==%MEDIAPIPE_VERSION%" "jax==%JAX_VERSION%" "jaxlib==%JAX_VERSION%" "russiannames==%RUSSIANNAMES_VERSION%" "duckdb==%DUCKDB_VERSION%"
 )
 if errorlevel 1 (
     if "%PIP_INSECURE%"=="1" (

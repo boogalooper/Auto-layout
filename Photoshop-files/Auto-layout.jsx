@@ -18,7 +18,9 @@
 
 $.localize = true;
 
-const ver = '0.10.62',
+// true: JPEG through the prepared Smart Object; false/absent: direct PSB export.
+const USE_LEGACY_JPEG = false;
+const ver = '0.10.63',
     UUID = '4f33f0a7-2e8f-4b6d-9ec0-61d98a44f99a',
     PATH_TOLERANCE = 0.5,
     GEOMETRY_EPS = 0.75,
@@ -124,7 +126,7 @@ function main() {
         });
         if (preparation) progressStage('Preparing objects for analysis', function () {
             activeDocument.suspendHistory('Auto layout prepare', 'prepareLayoutSources();');
-            if (typeof app.refresh == 'function') app.refresh();
+            activeDocument.suspendHistory('Auto layout prepare','function autoLayoutPrepareBoundary() {}');
         });
         items = progressStage('Reading layer sizes', function () {
             return collectLayoutItems(sourceState.layerIds);
@@ -2607,7 +2609,8 @@ function photoCacheSession() {
 function photoCacheKeys(items, documentId) {
     var session = photoCacheSession(), keys = [];
     for (var i = 0; i < items.length; i++) keys.push(objectToJSON([
-        session, documentId, items[i].name, items[i].analysisIdentity
+        session, documentId, items[i].name, items[i].analysisIdentity, GENDER_PREVIEW_SIZE,
+        typeof USE_LEGACY_JPEG!='undefined' && USE_LEGACY_JPEG===true?'jpg':'psb'
     ]));
     return keys;
 }
@@ -2658,118 +2661,102 @@ function analyzeSemantics(items) {
             cachedPhotos = py.sendPayload('analysis_cache', cacheKeys) || [];
         }
         catch (cacheError) { if (cacheError.number == 8007) throw cacheError; }
-        var analysisBaseHistory = activeDocument.activeHistoryState,
-            analysisAnchorHistory = null;
-        try {
-            for (i = 0; i < photoItems.length; i++) {
-                var target = photoItems[i],
-                    wantGender = genderReady && !genderPy.isDisabled() && target.gender == 'U',
-                    wantHead = headReady && !headPy.isDisabled(),
-                    wantColor = colorReady && !colorPy.isDisabled();
-                if (!wantGender && !wantHead && !wantColor) continue;
-                progress(30 + 2 * i / Math.max(1, photoItems.length), 'Photo ' + i + '/' + photoItems.length);
-                var previewPath = null;
-                try {
-                    var cached = cachedPhotos[i] || {},
-                        needGender = wantGender && !cached.gender,
-                        needHead = wantHead && !cached.head_turn,
-                        needColor = wantColor && !cached.color,
-                        driver = needGender ? genderPy : needHead ? headPy : colorPy,
-                        other = needGender && needHead ? headPy : null,
-                        call = { ok: true, value: { id: target.id } };
-                    if (wantGender && cached.gender) applyGenderResult(target, cached.gender);
-                    if (wantHead && cached.head_turn) applyHeadTurnResult(target, cached.head_turn);
-                    if (wantColor && cached.color) target.colorPalette = cached.color.palette;
-                    if (needGender || needHead || needColor) {
-                        if (!analysisAnchorHistory) {
-                            app.activeDocument.suspendHistory('Auto layout analysis', 'function autoLayoutAnalysisAnchor () {return}');
-                            analysisAnchorHistory = activeDocument.activeHistoryState;
-                        }
-                        previewHistoryTouched = true;
-                        previewPath = createGenderPreview(target, parentDocumentId, analysisAnchorHistory);
-                        beginPythonWait(1 / Math.max(1, photoItems.length), 4000);
-                        call = driver.call('analyze_image', {
-                            id: target.id, name: target.name, path: previewPath, cache_key: cacheKeys[i] || null,
-                            gender: needGender, head_turn: needHead, color: needColor
-                        }, { photo: true, deferSuccess: true });
-                    }
-                    if (call.ok && call.value && call.value.id == target.id) {
-                        if (cached.gender) call.value.gender = cached.gender;
-                        if (cached.head_turn) call.value.head_turn = cached.head_turn;
-                        if (cached.color) call.value.color = cached.color;
-                    }
-                    if (!call.ok) {
-                        imageEmptyStreak = 0;
-                        if (other) other.recordFailure(call.reason || 'python_error', call.message);
-                        if (needColor && driver != colorPy) colorPy.recordFailure(call.reason || 'python_error', call.message);
-                        continue;
-                    }
-                    var answer = call.value,
-                        validEnvelope = answer && answer.id == target.id,
-                        semanticRequestedCount = 0,
-                        semanticUsefulCount = 0,
-                        semanticResultFailure = !validEnvelope;
-                    if (wantGender) {
-                        semanticRequestedCount++;
-                        var genderResult = validEnvelope ? answer.gender : null,
-                            genderOutcome = classifyAnalysisResult(genderResult);
-                        if (genderOutcome.failure) {
-                            semanticResultFailure = true;
-                            genderPy.recordFailure(genderOutcome.reason, genderOutcome.message);
-                        } else {
-                            genderPy.recordSuccess();
-                            applyGenderResult(target, genderResult);
-                            if (genderResult.analysis_status == 'ok' && (genderResult.sex == 'M' || genderResult.sex == 'F')) semanticUsefulCount++;
-                        }
-                    }
-                    if (wantColor) {
-                        semanticRequestedCount++;
-                        var colorResult = validEnvelope ? answer.color : null, colorOutcome = classifyColorOutcome(colorResult);
-                        if (colorOutcome.failure) {
-                            semanticResultFailure = true;
-                            colorPy.recordFailure(colorOutcome.reason, colorOutcome.message);
-                        } else {
-                            colorPy.recordSuccess();
-                            if (colorResult.analysis_status == 'ok') {
-                                target.colorPalette = colorResult.palette;
-                                semanticUsefulCount++;
-                            }
-                        }
-                    }
-                    if (wantHead) {
-                        semanticRequestedCount++;
-                        var headResult = validEnvelope ? answer.head_turn : null,
-                            headOutcome = classifyHeadTurnOutcome(headResult);
-                        if (headOutcome.failure) {
-                            semanticResultFailure = true;
-                            headPy.recordFailure(headOutcome.reason, headOutcome.message);
-                        } else {
-                            headPy.recordSuccess();
-                            applyHeadTurnResult(target, headResult);
-                            if (target.headTurnValid) semanticUsefulCount++;
-                        }
-                    }
-                    if (semanticRequestedCount) {
-                        if (semanticResultFailure) imageEmptyStreak = 0;
-                        else recordAnalysisResult(semanticUsefulCount > 0);
-                    }
-                } catch (e) {
-                    if (e.number == 8007 || e.autoLayoutRestoreFailure) throw e;
-                    var message = e.message ? e.message : String(e);
-                    imageEmptyStreak = 0;
-                    if (needGender) genderPy.recordFailure('preview_error', message);
-                    if (needHead) headPy.recordFailure('preview_error', message);
-                    if (needColor) colorPy.recordFailure('preview_error', message);
-                } finally {
-                    if (previewPath && !removePreview(previewPath)) {
-                        try { py.cleanup(previewPath); } catch (cleanupError) { }
-                    }
-                    progress(30 + 2 * (i + 1) / Math.max(1, photoItems.length), 'Photo ' + (i + 1) + '/' + photoItems.length);
+        var prepared = prepareSemanticBatch(photoItems,cachedPhotos,cacheKeys,genderReady,headReady,colorReady);
+        previewHistoryTouched = prepared.touched;
+        for (i = 0; i < photoItems.length; i++) {
+            var target = photoItems[i],
+                wantGender = genderReady && !genderPy.isDisabled() && target.gender == 'U',
+                wantHead = headReady && !headPy.isDisabled(),
+                wantColor = colorReady && !colorPy.isDisabled();
+            if (!wantGender && !wantHead && !wantColor) continue;
+            progress(30 + 2 * i / Math.max(1, photoItems.length), 'Photo ' + i + '/' + photoItems.length);
+            try {
+                var cached = cachedPhotos[i] || {},
+                    needGender = wantGender && !cached.gender,
+                    needHead = wantHead && !cached.head_turn,
+                    needColor = wantColor && !cached.color,
+                    driver = needGender ? genderPy : needHead ? headPy : colorPy,
+                    other = needGender && needHead ? headPy : null,
+                    call = { ok: true, value: { id: target.id } };
+                if (wantGender && cached.gender) applyGenderResult(target, cached.gender);
+                if (wantHead && cached.head_turn) applyHeadTurnResult(target, cached.head_turn);
+                if (wantColor && cached.color) target.colorPalette = cached.color.palette;
+                if (needGender || needHead || needColor) {
+                    call=prepared.calls[i] || {ok:false,reason:'missing_result',message:'Photo analysis result is unavailable'};
+                    if(call.skipped) break;
+                    if(!call.ok) driver.recordFailure(call.reason || 'python_error',call.message);
                 }
-                if (imageAnalysisDisabled) break;
+                if (call.ok && call.value && call.value.id == target.id) {
+                    if (cached.gender) call.value.gender = cached.gender;
+                    if (cached.head_turn) call.value.head_turn = cached.head_turn;
+                    if (cached.color) call.value.color = cached.color;
+                }
+                if (!call.ok) {
+                    imageEmptyStreak = 0;
+                    if (other) other.recordFailure(call.reason || 'python_error', call.message);
+                    if (needColor && driver != colorPy) colorPy.recordFailure(call.reason || 'python_error', call.message);
+                    continue;
+                }
+                var answer = call.value,
+                    validEnvelope = answer && answer.id == target.id,
+                    semanticRequestedCount = 0,
+                    semanticUsefulCount = 0,
+                    semanticResultFailure = !validEnvelope;
+                if (wantGender) {
+                    semanticRequestedCount++;
+                    var genderResult = validEnvelope ? answer.gender : null,
+                        genderOutcome = classifyAnalysisResult(genderResult);
+                    if (genderOutcome.failure) {
+                        semanticResultFailure = true;
+                        genderPy.recordFailure(genderOutcome.reason, genderOutcome.message);
+                    } else {
+                        genderPy.recordSuccess();
+                        applyGenderResult(target, genderResult);
+                        if (genderResult.analysis_status == 'ok' && (genderResult.sex == 'M' || genderResult.sex == 'F')) semanticUsefulCount++;
+                    }
+                }
+                if (wantColor) {
+                    semanticRequestedCount++;
+                    var colorResult = validEnvelope ? answer.color : null, colorOutcome = classifyColorOutcome(colorResult);
+                    if (colorOutcome.failure) {
+                        semanticResultFailure = true;
+                        colorPy.recordFailure(colorOutcome.reason, colorOutcome.message);
+                    } else {
+                        colorPy.recordSuccess();
+                        if (colorResult.analysis_status == 'ok') {
+                            target.colorPalette = colorResult.palette;
+                            semanticUsefulCount++;
+                        }
+                    }
+                }
+                if (wantHead) {
+                    semanticRequestedCount++;
+                    var headResult = validEnvelope ? answer.head_turn : null,
+                        headOutcome = classifyHeadTurnOutcome(headResult);
+                    if (headOutcome.failure) {
+                        semanticResultFailure = true;
+                        headPy.recordFailure(headOutcome.reason, headOutcome.message);
+                    } else {
+                        headPy.recordSuccess();
+                        applyHeadTurnResult(target, headResult);
+                        if (target.headTurnValid) semanticUsefulCount++;
+                    }
+                }
+                if (semanticRequestedCount) {
+                    if (semanticResultFailure) imageEmptyStreak = 0;
+                    else recordAnalysisResult(semanticUsefulCount > 0);
+                }
+            } catch (e) {
+                if (e.number == 8007 || e.autoLayoutRestoreFailure) throw e;
+                var message = e.message ? e.message : String(e);
+                imageEmptyStreak = 0;
+                if (needGender) genderPy.recordFailure('preview_error', message);
+                if (needHead) headPy.recordFailure('preview_error', message);
+                if (needColor) colorPy.recordFailure('preview_error', message);
+            } finally {
+                progress(30 + 2 * (i + 1) / Math.max(1, photoItems.length), 'Photo ' + (i + 1) + '/' + photoItems.length);
             }
-        } finally {
-            if (analysisAnchorHistory) restoreAnalysisHistory(parentDocumentId, analysisBaseHistory, false);
+            if (imageAnalysisDisabled) break;
         }
     }
     var failureMessages = [], featureStates = [];
@@ -3134,34 +3121,8 @@ function applyGenderResult(item, result) {
     item.gender = sex;
 }
 
-function restoreAnalysisHistory(parentDocumentId, anchorHistory, usePrevious) {
-    try {
-        var currentDocumentId = doc.getProperty('documentID');
-        if (currentDocumentId != parentDocumentId) {
-            doc.close(false);
-            currentDocumentId = doc.getProperty('documentID');
-        }
-        if (currentDocumentId != parentDocumentId) throw new Error(str.t('Исходный документ недоступен.', 'The source document is unavailable.'));
-        if (usePrevious) doc.selectPreviousHistoryState();
-        else if (anchorHistory) activeDocument.activeHistoryState = anchorHistory;
-        else throw new Error(str.t('Точка восстановления истории недоступна.', 'The history restore point is unavailable.'));
-        return;
-    } catch (historyError) {
-        try {
-            if (doc.getProperty('documentID') != parentDocumentId) doc.close(false);
-            if (doc.getProperty('documentID') != parentDocumentId || !anchorHistory) throw historyError;
-            activeDocument.activeHistoryState = anchorHistory;
-            return;
-        } catch (restoreError) {
-            var error = new Error(str.t('Не удалось восстановить документ после анализа фото. Раскладка остановлена: ', 'Could not restore the document after photo analysis. Layout has been stopped: ') + restoreError.message);
-            error.autoLayoutRestoreFailure = true;
-            throw error;
-        }
-    }
-}
-
 function autoLayoutPreviewWork() {
-    if (typeof previewWork != 'function') throw new Error('Preview callback is unavailable');
+    if(typeof previewWork!='function') throw new Error('Preview callback is unavailable');
     previewWork();
 }
 
@@ -3173,46 +3134,123 @@ function unsafePreviewName(name) {
         /^(con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])(?:\.|$)/i.test(name);
 }
 
-function createGenderPreview(item, parentDocumentId, analysisAnchorHistory) {
-    var result = { path: null },
-        previewStateCreated = false;
-
-    lr.selectLayers([item.id]);
-    var previousWork = previewWork;
-    previewWork = function () { makePreview(result); };
-    try {
-        app.activeDocument.suspendHistory('Auto layout preview', 'autoLayoutPreviewWork();');
-        previewStateCreated = true;
-    } catch (previewError) {
-        if (previewError.number == 8007) throw previewError;
-        throw new Error(str.t('Не удалось подготовить превью слоя "', 'Could not prepare a preview of layer "') + item.name + '": ' + (previewError.message || String(previewError)));
-    } finally {
-        previewWork = previousWork;
-        restoreAnalysisHistory(parentDocumentId, analysisAnchorHistory, previewStateCreated);
+function prepareSemanticBatch(photoItems, cachedPhotos, cacheKeys, genderReady, headReady, colorReady) {
+    var jobs=[], calls=[], needsImages=false, requestedFeatures={gender:false,head_turn:false,color:false}, legacyJPEG=typeof USE_LEGACY_JPEG!='undefined' && USE_LEGACY_JPEG===true;
+    for(var i=0;i<photoItems.length;i++) {
+        var item=photoItems[i], cached=cachedPhotos[i] || {},
+            wantGender=genderReady && item.gender=='U', wantHead=headReady, wantColor=colorReady,
+            payload={id:item.id,name:item.name,cache_key:cacheKeys[i] || null,cached:cached,
+                want_gender:wantGender,want_head_turn:wantHead,want_color:wantColor,
+                gender:!!(wantGender && !cached.gender),head_turn:!!(wantHead && !cached.head_turn),
+                color:!!(wantColor && !cached.color),path:null};
+        if(!wantGender && !wantHead && !wantColor) continue;
+        if(payload.gender || payload.head_turn || payload.color) needsImages=true;
+        requestedFeatures.gender=requestedFeatures.gender || wantGender;
+        requestedFeatures.head_turn=requestedFeatures.head_turn || wantHead;
+        requestedFeatures.color=requestedFeatures.color || wantColor;
+        jobs.push({index:i,item:item,payload:payload});
     }
-
-    if (!result.path) throw new Error(str.t('Не удалось создать превью слоя "', 'Could not create a preview for layer "') + item.name + str.t('".', '".'));
-    return result.path;
-
-    function makePreview(o) {
-        if (item.smartObject) lr.rasterize();
-        // Photoshop derives the embedded PSB filename from the layer name.
-        if (unsafePreviewName(item.name)) lr.setLayerName('ALG_preview_' + item.id);
+    if(!needsImages) return {calls:calls,touched:false};
+    if(!isFinite(GENDER_PREVIEW_SIZE) || GENDER_PREVIEW_SIZE<=0) throw new Error('Invalid GENDER_PREVIEW_SIZE');
+    var mode=doc.getProperty('mode'), modeValue=typeof mode=='string'?mode:(mode && mode.value),
+        depth=doc.getProperty('depth');
+    if((modeValue!='RGBColor' && modeValue!='RGBColorMode') || (depth!=8 && depth!=16 && depth!=32))
+        throw new Error(str.t('Для анализа фото нужен документ RGB, 8/16/32 бита на канал. Выберите Изображение → Режим → RGB.',
+            'Photo analysis requires an RGB document, 8/16/32 bits per channel. Choose Image > Mode > RGB Color.'));
+    var sourceDocument=app.activeDocument, sourceID=doc.getProperty('documentID'),
+        baseline=sourceDocument.activeHistoryState, layerCount=doc.getProperty('numberOfLayers'),
+        batch=null, pendingError=null, submitted=[], previousWork=previewWork, touched=false;
+    try {
+        if(!sourceID) throw new Error('Cannot read source document ID');
+        batch=py.sendPayload('photo_batch_begin',{empty_limit:OPTIONAL_PYTHON_EMPTY_LIMIT,failure_limit:OPTIONAL_PYTHON_FAILURE_LIMIT,features:requestedFeatures});
+        previewWork=function() {
+            // Close the native history callback normally, including on ESC.
+            try {
+                for(var j=0;j<jobs.length;j++) {
+                    var job=jobs[j], payload=job.payload;
+                    progress(30+1.5*j/Math.max(1,jobs.length),'Preparing layer '+(j+1)+'/'+jobs.length);
+                    if(payload.gender || payload.head_turn || payload.color) {
+                        try {payload.path=preparePreview(job.item);}
+                        catch(e) {
+                            if(e.number==8007 || e.autoLayoutRestoreFailure) throw e;
+                            payload.preview_error=e.message || String(e);
+                        }
+                    }
+                    var ack=py.sendPayload('photo_batch_add',{batch_id:batch,index:submitted.length,item:payload});
+                    submitted.push(job);
+                    if(ack && ack.stopped) break;
+                }
+            } catch(e) {pendingError=e;}
+        };
+        touched=true;
+        try {sourceDocument.suspendHistory('Auto layout analysis','autoLayoutPreviewWork();');}
+        catch(e) {pendingError=e;}
+        finally {
+            try {
+                app.activeDocument=sourceDocument;
+                previewWork=function() {};
+                sourceDocument.suspendHistory('Auto layout analysis','autoLayoutPreviewWork();');
+                sourceDocument.activeHistoryState=baseline;
+                if(doc.getProperty('numberOfLayers')!=layerCount) throw new Error('Layer count was not restored');
+                for(var n=0;n<photoItems.length;n++) {
+                    var original=photoItems[n], bounds=lr.getProperty('boundsNoEffects',false,original.id);
+                    if(lr.getProperty('layerKind',false,original.id)!=original.kind || !bounds)
+                        throw new Error('Original layer was not restored: '+original.name);
+                    var b=lr.descToObject(bounds.value), keys=['left','top','right','bottom'];
+                    for(var k=0;k<keys.length;k++)
+                        if(!isFinite(b[keys[k]]) || Math.abs(b[keys[k]]-original[keys[k]])>.001)
+                            throw new Error('Original layer bounds were not restored: '+original.name);
+                }
+            } catch(restoreError) {
+                var fatal=new Error('Could not restore the source document after photo preparation: '+restoreError.message);
+                fatal.autoLayoutRestoreFailure=true;throw fatal;
+            }
+        }
+        if(pendingError) throw pendingError;
+        var result=py.sendPayload('photo_batch_finish',{batch_id:batch},{longRequest:true});
+        if(!result || !(result.items instanceof Array) || result.items.length!=submitted.length)
+            throw new Error('Incomplete photo analysis batch');
+        for(var n=0;n<submitted.length;n++) calls[submitted[n].index]=result.items[n];
+        return {calls:calls,touched:true};
+    } catch(e) {
+        if(e.number==8007 || e.autoLayoutRestoreFailure) throw e;
+        for(var n=0;n<jobs.length;n++) calls[jobs[n].index]={ok:false,reason:'python_error',message:e.message || String(e)};
+        return {calls:calls,touched:touched};
+    } finally {
+        previewWork=previousWork;
+        if(batch) try {py.sendPayload('photo_batch_abort',{batch_id:batch});} catch(ignore) {}
+    }
+    function preparePreview(item) {
+        lr.selectLayers([item.id]);
+        if(item.smartObject) lr.rasterize();
+        var property=lr.getProperty('boundsNoEffects'), b=property && lr.descToObject(property.value);
+        if(!b || !(b.right>b.left && b.bottom>b.top)) throw new Error('Empty layer bounds: '+item.name);
+        var scale=Math.min(1,GENDER_PREVIEW_SIZE/Math.min(b.right-b.left,b.bottom-b.top));
+        if(scale<1) lr.resizePreview(scale);
+        if(unsafePreviewName(item.name)) lr.setLayerName('ALG_preview_'+item.id);
         lr.convertToSmartObject();
-        lr.editSmartObject();
-        doc.flatten();
-        var info = doc.getPreviewInfo();
-        if (info.mode != 'RGBColor' && info.mode != 'RGBColorMode') doc.convertToRGB();
-
-        var f = new File(Folder.temp + '/ALG_' + info.id + '_' +
-                (new Date).getTime() + '_' + Math.floor(Math.random() * 1000000) + '.jpg'),
-            k = GENDER_PREVIEW_SIZE / Math.min(info.width, info.height);
-
-        previews.push(f.fsName);
-        if (k < 1) doc.setScale(k);
-        doc.saveACopy(f);
-        o.path = f.fsName;
-        doc.close(false);
+        var file=new File(Folder.temp+'/ALG_'+sourceID+'_'+(new Date).getTime()+'_'+Math.floor(Math.random()*1000000)+(legacyJPEG?'.jpg':'.psb'));
+        previews.push(file.fsName);
+        if(legacyJPEG) {
+            var child=null;
+            try {
+                lr.editSmartObject();
+                var openedID=doc.getProperty('documentID');
+                if(!openedID || openedID==sourceID) throw new Error('Cannot confirm the prepared Smart Object document');
+                child=app.activeDocument;
+                doc.prepareJPEG();doc.saveACopy(file);
+            } finally {
+                if(!child) {
+                    var currentID=doc.getProperty('documentID');
+                    if(currentID && currentID!=sourceID) child=app.activeDocument;
+                }
+                if(child) try {app.activeDocument=child;doc.close(false);}
+                catch(closeError) {closeError.autoLayoutRestoreFailure=true;throw closeError;}
+                finally {app.activeDocument=sourceDocument;}
+            }
+        } else lr.exportSmartObject(file);
+        if(!file.exists || !file.length) throw new Error('Preview was not written: '+item.name);
+        return file.fsName;
     }
 }
 
@@ -6642,7 +6680,7 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
         options = options || {};
         if (options.longRequest === true) beginPythonWait();
         try {
-            var result = sendMessage({ type: type, message: payload, long_request: options.longRequest === true }, ANALYSIS_DELAY);
+            var result = sendMessage({ type: type, message: payload, long_request: options.longRequest === true }, type=='photo_batch_finish'?15*60*1000:ANALYSIS_DELAY);
             if (!result) throw new Error(str.t('Превышено время ожидания ответа Python.', 'Python response timeout.'));
             if (result.server_id != serverID) throw new Error(str.t('Ответ получен от несовместимого Python-сервера.', 'Response received from an incompatible Python server.'));
             if (result.type == 'cancelled') throwCancelled();
@@ -6703,7 +6741,17 @@ function AutoLayoutApi(apiHost, portSend, portListen, apiFile) {
                 var answer = listener.poll();
                 if (answer) {
                     var parsed = null;
-                    try { answer.timeout = 5; parsed = parseJSONData(answer.readln()); }
+                    try {
+                        answer.timeout=5;
+                        var body='',part;
+                        while(!answer.eof) {
+                            part=answer.read(65536);
+                            if(!part) break;
+                            body+=part;
+                            if(body.indexOf('\n')>=0) break;
+                        }
+                        parsed=parseJSONData(body);
+                    }
                     catch (parseError) { }
                     finally { answer.close(); }
                     if (parsed && parsed.request_id == o.request_id) {
@@ -6813,6 +6861,29 @@ function AM(target, order) {
         executeAction(s2t('rasterizeLayer'), d, DialogModes.NO);
     };
 
+    this.resizePreview = function (scale) {
+        var d=new AD, r=new AR, offset=new AD;
+        r.putEnumerated(s2t('layer'),s2t('ordinal'),s2t('targetEnum'));
+        d.putReference(s2t('null'),r);
+        d.putEnumerated(s2t('freeTransformCenterState'),s2t('quadCenterState'),s2t('QCSAverage'));
+        offset.putUnitDouble(s2t('horizontal'),s2t('pixelsUnit'),0);
+        offset.putUnitDouble(s2t('vertical'),s2t('pixelsUnit'),0);
+        d.putObject(s2t('offset'),s2t('offset'),offset);
+        d.putUnitDouble(s2t('width'),s2t('percentUnit'),scale*100);
+        d.putUnitDouble(s2t('height'),s2t('percentUnit'),scale*100);
+        d.putEnumerated(s2t('interfaceIconFrameDimmed'),s2t('interpolationType'),s2t('nearestNeighbor'));
+        executeAction(s2t('transform'),d,DialogModes.NO);
+    };
+    this.exportSmartObject = function (file) {
+        var d=new AD, previousDialogs=app.displayDialogs;
+        d.putPath(s2t('null'),file);
+        try {
+            app.displayDialogs=DialogModes.NO;
+            executeAction(s2t('placedLayerExportContents'),d,DialogModes.NO);
+        } finally {
+            app.displayDialogs=previousDialogs;
+        }
+    };
     this.convertToSmartObject = function () {
         executeAction(s2t('newPlacedLayer'), undefined, DialogModes.NO);
     };
@@ -6821,39 +6892,29 @@ function AM(target, order) {
         executeAction(s2t('placedLayerEditContents'), undefined, DialogModes.NO);
     };
 
-    this.flatten = function () {
-        executeAction(s2t('flattenImage'), undefined, DialogModes.NO);
-    };
 
-    this.convertToRGB = function () {
-        var d = new AD;
-        d.putClass(s2t('to'), s2t('RGBColorMode'));
-        executeAction(s2t('convertMode'), d, DialogModes.NO);
-    };
 
-    this.getPreviewInfo = function () {
-        var r = new AR;
-        r.putEnumerated(s2t('document'), s2t('ordinal'), s2t('targetEnum'));
-        var d = executeActionGet(r),
-            resolution = Number(getDescValue(d, s2t('resolution'))),
-            width = Number(getDescValue(d, s2t('width'))) * resolution / 72,
-            height = Number(getDescValue(d, s2t('height'))) * resolution / 72,
-            mode = d.hasKey(s2t('mode')) ? getDescValue(d, s2t('mode')) : null;
-        if (!isFinite(width) || !isFinite(height) || width <= 0 || height <= 0)
-            throw new Error('Invalid preview dimensions');
-        return { width: width, height: height, id: getDescValue(d, s2t('documentID')),
-            mode: mode && mode.value ? mode.value : '' };
-    };
 
-    this.setScale = function (scale) {
-        var d = new AD;
-        d.putUnitDouble(s2t('width'), s2t('percentUnit'), scale * 100);
-        d.putBoolean(s2t('scaleStyles'), true);
-        d.putBoolean(s2t('constrainProportions'), true);
-        d.putEnumerated(s2t('interpolation'), s2t('interpolationType'), s2t('nearestNeighbor'));
-        executeAction(s2t('imageSize'), d, DialogModes.NO);
-    };
 
+
+
+
+
+    this.prepareJPEG = function () {
+        // Convert only the opened disposable preview; source pixels are restored.
+        var mode=this.getProperty('mode'), value=typeof mode=='string'?mode:(mode && mode.value);
+        if(value!='RGBColor' && value!='RGBColorMode') {
+            var descriptor=new AD;
+            descriptor.putClass(s2t('to'),s2t('RGBColorMode'));
+            executeAction(s2t('convertMode'),descriptor,DialogModes.NO);
+        }
+        if(this.getProperty('depth')!=8) {
+            var descriptor=new AD;
+            descriptor.putInteger(s2t('depth'),8);
+            descriptor.putBoolean(s2t('merge'),false);
+            executeAction(s2t('convertMode'),descriptor,DialogModes.NO);
+        }
+    };
     this.saveACopy = function (file) {
         var d1 = new AD,
             d = new AD;
@@ -6871,13 +6932,7 @@ function AM(target, order) {
         executeAction(s2t('close'), d, DialogModes.NO);
     };
 
-    this.selectPreviousHistoryState = function () {
-        var r = new AR,
-            d = new AD;
-        r.putEnumerated(s2t('historyState'), s2t('ordinal'), s2t('previous'));
-        d.putReference(s2t('null'), r);
-        executeAction(s2t('select'), d, DialogModes.NO);
-    };
+
 
     this.selectLayers = function (ids) {
         var r = new AR,
